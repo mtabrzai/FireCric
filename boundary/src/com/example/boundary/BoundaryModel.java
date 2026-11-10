@@ -33,6 +33,7 @@ public class BoundaryModel {
     public float pitchX;
     public float pitchY;
     public boolean ballLive;
+    public boolean bounced;
     public String delivery = "";
     public String deliveryHint = "";
 
@@ -46,6 +47,8 @@ public class BoundaryModel {
     public float batX;
     public float batTargetX;
     public float swing;
+    public float swingDir = 1f;
+    private float strokeAcc;
 
     public int runs;
     public int wickets;
@@ -138,12 +141,26 @@ public class BoundaryModel {
         ballX = width / 2f;
         ballY = 90;
         ballLive = true;
+        bounced = false;
         phase = Phase.RUNUP;
         phaseTimer = 0;
     }
 
     public synchronized void moveBat(float dx, float dy) {
         batTargetX = clamp(batTargetX + dx, width * BAT_ZONE_MIN, width * BAT_ZONE_MAX);
+        noteStroke(dx);
+    }
+
+    // a firm sideways phone movement is a stroke: swing the bat that way
+    public synchronized void noteStroke(float dx) {
+        strokeAcc += dx;
+        if (phase == Phase.BOWLING && Math.abs(strokeAcc) >= 70f) {
+            swingDir = strokeAcc > 0 ? 1f : -1f;
+            strokeAcc = 0;
+            strike();
+        } else if (Math.abs(strokeAcc) > 400f) {
+            strokeAcc = 0;
+        }
     }
 
     public synchronized void strike() {
@@ -156,6 +173,9 @@ public class BoundaryModel {
             return;
         }
         swing = 1f;
+        if (ballX != batX) {
+            swingDir = ballX >= batX ? 1f : -1f;
+        }
         float err = ballY - contactY;
         float quality = clamp(1f - Math.abs(err) / 140f, 0f, 1f);
         if (err < -35) {
@@ -272,6 +292,13 @@ public class BoundaryModel {
             case BOWLING:
                 ballX += ballVX * dtMs / 1000f;
                 ballY += ballVY * dtMs / 1000f;
+                ballVY += 900 * dtMs / 1000f; // gravity so the pitch bounce arcs
+                if (!bounced && ballY >= pitchY) {
+                    bounced = true;
+                    ballY = pitchY;
+                    ballVY = -Math.abs(ballVY) * 0.38f; // bounce up off the pitch
+                    ballVX *= 0.92f;
+                }
                 if (ballY >= batLineY()) {
                     ballLive = false;
                     endBallDot();
@@ -318,6 +345,10 @@ public class BoundaryModel {
 
     public synchronized float getSwing() {
         return swing;
+    }
+
+    public synchronized float getSwingDir() {
+        return swingDir;
     }
 
     public synchronized int getRuns() {
