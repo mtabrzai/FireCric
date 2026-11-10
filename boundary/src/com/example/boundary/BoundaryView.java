@@ -245,31 +245,79 @@ public class BoundaryView extends View {
 
     private void drawField(Canvas canvas, BoundaryModel m, int w, int h) {
         float batLine = m.batLineY();
+        float horizon = h * 0.30f;
+
+        // outfield with mowing stripes (perspective fan)
+        Paint grass = new Paint();
+        for (int i = 0; i < 9; i++) {
+            grass.setColor(i % 2 == 0 ? 0xFF256B3A : 0xFF1E5631);
+            float t0 = i / 9f, t1 = (i + 1) / 9f;
+            android.graphics.Path stripe = new android.graphics.Path();
+            stripe.moveTo(w * t0, horizon);
+            stripe.lineTo(w * t1, horizon);
+            stripe.lineTo(w * (0.5f + (t1 - 0.5f) * 2.6f), h);
+            stripe.lineTo(w * (0.5f + (t0 - 0.5f) * 2.6f), h);
+            stripe.close();
+            canvas.drawPath(stripe, grass);
+        }
+        // pitch: trapezoid narrowing toward the bowler (3D perspective)
+        Paint pitch = new Paint(Paint.ANTI_ALIAS_FLAG);
+        android.graphics.Path p = new android.graphics.Path();
+        p.moveTo(w / 2f - 34, horizon);
+        p.lineTo(w / 2f + 34, horizon);
+        p.lineTo(w / 2f + w * 0.13f, batLine + 40);
+        p.lineTo(w / 2f - w * 0.13f, batLine + 40);
+        p.close();
+        canvas.drawPath(p, pitch);
+        // mow bands across the pitch
+        for (int i = 0; i < 5; i++) {
+            float t0 = i / 5f, t1 = (i + 1) / 5f;
+            float y0 = horizon + (batLine + 40 - horizon) * t0;
+            float y1 = horizon + (batLine + 40 - horizon) * t1;
+            float half0 = 34 + (w * 0.13f - 34) * t0;
+            float half1 = 34 + (w * 0.13f - 34) * t1;
+            Paint band = new Paint(Paint.ANTI_ALIAS_FLAG);
+            band.setColor(i % 2 == 0 ? 0xFFD7B98A : 0xFFC9A96F);
+            android.graphics.Path b = new android.graphics.Path();
+            b.moveTo(w / 2f - half0, y0);
+            b.lineTo(w / 2f + half0, y0);
+            b.lineTo(w / 2f + half1, y1);
+            b.lineTo(w / 2f - half1, y1);
+            b.close();
+            canvas.drawPath(b, band);
+        }
+        // crease + stumps
         Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
         line.setColor(0xFFF6F8EE);
         line.setStrokeWidth(4f);
-        canvas.drawLine(w / 2f - 90, batLine, w / 2f + 90, batLine, line);
-        float bx = w / 2f;
-        figure.setColor(0xFFD7FF67);
-        canvas.drawCircle(bx, 150, 16, figure);
-        canvas.drawLine(bx, 166, bx, 210, figure);
-        canvas.drawLine(bx, 210, bx - 14, 250, figure);
-        canvas.drawLine(bx, 210, bx + 14, 250, figure);
-        float px = m.getBatX();
-        figure.setColor(0xFFF6F8EE);
-        canvas.drawCircle(px, batLine - 96, 15, figure);
-        canvas.drawLine(px, batLine - 81, px, batLine - 36, figure);
-        canvas.drawLine(px, batLine - 36, px - 13, batLine, figure);
-        canvas.drawLine(px, batLine - 36, px + 13, batLine, figure);
-        float sw = m.getSwing();
-        float ang = (float) Math.toRadians(-95 + sw * 80);
-        float hx = px, hy = batLine - 52;
-        canvas.drawLine(hx, hy, hx + (float) Math.sin(ang) * 78, hy - (float) Math.cos(ang) * 78, batPaint);
+        canvas.drawLine(w / 2f - w * 0.05f, batLine, w / 2f + w * 0.05f, batLine, line);
+        figure.setColor(0xFFFFF3D2);
+        figure.setStrokeWidth(6f);
+        for (int i = -1; i <= 1; i++) {
+            canvas.drawLine(w / 2f + i * 12, batLine - 34, w / 2f + i * 12, batLine, figure);
+        }
+        // boundary rope
+        Paint rope = new Paint(Paint.ANTI_ALIAS_FLAG);
+        rope.setColor(0xFFF6F8EE);
+        rope.setStyle(Paint.Style.STROKE);
+        rope.setStrokeWidth(8f);
+        canvas.drawArc(w / 2f - w * 0.46f, h * 0.55f, w / 2f + w * 0.46f, h * 1.35f, 200, 140, false, rope);
+
+        // bowler runs in during RUNUP, scales up as he approaches the crease
+        drawBowler(canvas, m, w, h, horizon);
+
+        // batsman at the crease, bat in hand (larger, closer to camera)
+        drawBatsman(canvas, m, m.getBatX(), batLine);
+
+        // pitch marker
         if (m.isBallLive() && (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING)) {
             Paint pm = new Paint(Paint.ANTI_ALIAS_FLAG);
             pm.setColor(0xFFD7FF67);
-            canvas.drawCircle(m.pitchX, m.pitchY, 7, pm);
+            float pr = 4 + 5 * (m.pitchY / h);
+            canvas.drawCircle(m.pitchX, m.pitchY, pr, pm);
         }
+
+        // ball with perspective scale + ground shadow + trail
         float bx2, by2;
         if (m.getPhase() == BoundaryModel.Phase.FLYING) {
             bx2 = m.hitX;
@@ -288,14 +336,60 @@ public class BoundaryView extends View {
         } else {
             return;
         }
-        ballPaint.setShader(new RadialGradient(bx2, by2, 11,
+        float depth = Math.max(0f, Math.min(1f, by2 / h));
+        float br = 7 + depth * 13;
+        Paint sh = new Paint(Paint.ANTI_ALIAS_FLAG);
+        sh.setColor(0x66000000);
+        float groundY = Math.min(by2, batLine + 30);
+        float air = Math.max(0f, (groundY - by2) / (batLine - horizon + 1));
+        canvas.drawOval(bx2 - br * 1.1f, groundY - br * 0.25f, bx2 + br * 1.1f, groundY + br * 0.25f, sh);
+        ballPaint.setShader(new RadialGradient(bx2 - br * 0.3f, by2 - br * 0.3f, br,
                 new int[]{0xFFFFAC77, 0xFFF15D4D, 0xFFD33B40}, null, Shader.TileMode.CLAMP));
-        canvas.drawCircle(bx2, by2, 10, ballPaint);
-        canvas.drawLine(bx2 - 6, by2 - 6, bx2 + 6, by2 + 6, seamPaint);
+        canvas.drawCircle(bx2, by2, br, ballPaint);
+        seamPaint.setStrokeWidth(Math.max(2f, br * 0.3f));
+        canvas.drawLine(bx2 - br * 0.6f, by2 - br * 0.6f, bx2 + br * 0.6f, by2 + br * 0.6f, seamPaint);
         String popup = m.getPopup();
         if (popup.length() > 0) {
             centerText(canvas, lime, 110, popup, w / 2f, h * 0.5f);
         }
+    }
+
+    private void drawFigure(Canvas canvas, float cx, float cy, float s, int color) {
+        figure.setColor(color);
+        figure.setStrokeWidth(9f * s);
+        canvas.drawCircle(cx, cy, 15 * s, figure);
+        canvas.drawLine(cx, cy + 15 * s, cx, cy + 52 * s, figure);
+        canvas.drawLine(cx, cy + 52 * s, cx - 12 * s, cy + 88 * s, figure);
+        canvas.drawLine(cx, cy + 52 * s, cx + 12 * s, cy + 88 * s, figure);
+        canvas.drawLine(cx, cy + 26 * s, cx - 18 * s, cy + 42 * s, figure);
+        canvas.drawLine(cx, cy + 26 * s, cx + 18 * s, cy + 42 * s, figure);
+    }
+
+    private void drawBowler(Canvas canvas, BoundaryModel m, int w, int h, float horizon) {
+        float runT = m.getPhase() == BoundaryModel.Phase.RUNUP ? 0.4f : 1f;
+        float bY = h * 0.10f + runT * (horizon - h * 0.10f);
+        float bScale = 0.55f + 0.45f * runT;
+        drawFigure(canvas, w / 2f, bY, bScale, 0xFFD7FF67);
+    }
+
+    private void drawBatsman(Canvas canvas, BoundaryModel m, float px, float batLine) {
+        float s = 1.5f; // close to camera
+        drawFigure(canvas, px, batLine - 92 * s, s, 0xFFF6F8EE);
+        // bat in hand: hangs down at rest, sweeps a full stroke arc on swing
+        float sw = m.getSwing();
+        float dir = m.getSwingDir();
+        float p = 1f - sw; // 0 at backlift -> 1 at follow-through
+        float ang = (float) Math.toRadians(-150 + p * 240);
+        float hx = px, hy = batLine - 58 * s;
+        float len = 88 * s;
+        float tipX = hx + (float) Math.sin(ang) * len * dir;
+        float tipY = hy - (float) Math.cos(ang) * len;
+        batPaint.setStrokeWidth(15f * s);
+        canvas.drawLine(hx, hy, tipX, tipY, batPaint);
+        Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+        edge.setColor(0xFFF6F8EE);
+        edge.setStrokeWidth(3f * s);
+        canvas.drawLine(hx + (tipX - hx) * 0.7f, hy + (tipY - hy) * 0.7f, tipX, tipY, edge);
     }
 
     private void drawDeliveryTag(Canvas canvas, BoundaryModel m, int w, int h) {
