@@ -14,9 +14,10 @@ public class BoundaryModel {
     private static final float BAT_LINE_RATIO = 0.84f;
     private static final float PITCH_TOP = 0.42f;
     private static final float PITCH_BOT = 0.74f;
-    private static final float BAT_ZONE_MIN = 0.14f;
-    private static final float BAT_ZONE_MAX = 0.86f;
-    private static final float STRIKE_HALF_WIDTH = 95f; // forgiving: approximate strokes count
+    private static final float ANGLE_LIMIT = 60f;   // 120° forward hitting zone
+    private static final float ANGLE_TOL = 18f;     // bat-vs-ball angle tolerance (deg)
+    private static final float TRAVEL_MS = 1500f;   // release -> bat travel time
+    private static final float WOBBLE = 0.03f;      // small line wobble (fraction of width)
 
     private final float width;
     private final float height;
@@ -44,11 +45,11 @@ public class BoundaryModel {
     public float hitDist;
     public float hitFlown;
 
-    public float batX;
-    public float batTargetX;
+    public float batX;              // fixed at crease center
+    public float batAngle;          // deg, 0 = straight at the bowler, ±60 within the 120° zone
+    public float batAngleTarget;
     public float swing;
     public float swingDir = 1f;
-    private float strokeAcc;
 
     public int runs;
     public int wickets;
@@ -93,8 +94,9 @@ public class BoundaryModel {
         resultTitle = "";
         resultSub = "";
         popup = "";
-        batTargetX = width / 2f;
-        batX = batTargetX;
+        batX = width / 2f;
+        batAngle = 0f;
+        batAngleTarget = 0f;
         phase = Phase.LOBBY;
         phaseTimer = 0;
     }
@@ -130,9 +132,10 @@ public class BoundaryModel {
         }
         delivery = type;
         deliveryHint = hint;
-        pitchX = width / 2f + (random.nextFloat() - 0.5f) * width * 0.5f;
+        pitchX = width / 2f + (random.nextFloat() - 0.5f) * width * WOBBLE * 2f;
         pitchY = height * (PITCH_TOP + (lenFrac - 0.47f) * 0.62f);
-        float speed = 430 + random.nextFloat() * 250;
+        float dist = batLineY() - 90;
+        float speed = dist / (TRAVEL_MS / 1000f);   // ~1.5 s release -> bat
         float dx = pitchX - width / 2f;
         float dy = pitchY - 90;
         float d = (float) Math.sqrt(dx * dx + dy * dy);
@@ -146,50 +149,32 @@ public class BoundaryModel {
         phaseTimer = 0;
     }
 
+    // phone motion changes ONLY the bat angle (batsman stays put)
     public synchronized void moveBat(float dx, float dy) {
-        batTargetX = clamp(batTargetX + dx, width * BAT_ZONE_MIN, width * BAT_ZONE_MAX);
-        noteStroke(dx);
+        batAngleTarget = clamp(batAngleTarget + dx * 0.15f, -ANGLE_LIMIT, ANGLE_LIMIT);
     }
 
-    // a firm sideways phone movement is a stroke: swing the bat that way
-    public synchronized void noteStroke(float dx) {
-        strokeAcc += dx;
-        if (phase == Phase.BOWLING && Math.abs(strokeAcc) >= 70f) {
-            swingDir = strokeAcc > 0 ? 1f : -1f;
-            strokeAcc = 0;
-            strike();
-        } else if (Math.abs(strokeAcc) > 400f) {
-            strokeAcc = 0;
-        }
+    public synchronized float ballAngleDeg() {
+        return (float) Math.toDegrees(Math.atan2(ballVX, ballVY)); // 0 = straight down the pitch
     }
 
-    public synchronized void strike() {
-        if (phase != Phase.BOWLING || !ballLive) {
-            return;
-        }
-        float contactY = batLineY() - 30;
-        if (ballY < pitchY + 6 || ballY > batLineY()) {
-            swing = 1f;
-            return;
-        }
+    private float angleErr() {
+        float e = batAngle - ballAngleDeg();
+        while (e > 180f) e -= 360f;
+        while (e < -180f) e += 360f;
+        return e;
+    }
+
+    // automatic contact evaluation when the ball reaches the bat
+    private void resolveContact(boolean timed) {
+        float err = angleErr();
+        float aErr = Math.abs(err);
         swing = 1f;
-        if (ballX != batX) {
-            swingDir = ballX >= batX ? 1f : -1f;
-        }
-        float err = ballY - contactY;
-        float quality = clamp(1f - Math.abs(err) / 140f, 0f, 1f);
-        if (err < -35) {
-            timingLabel = "EARLY";
-        } else if (err > 35) {
-            timingLabel = "LATE";
-        } else if (quality >= 0.75f) {
-            timingLabel = "PERFECT";
-        } else {
-            timingLabel = "GOOD";
-        }
-        if (Math.abs(ballX - batX) <= STRIKE_HALF_WIDTH) {
-            if (err < -35 && quality < 0.65f) {
-                // top edge — caught in the forward field
+        swingDir = err >= 0 ? 1f : -1f;
+        if (aErr <= ANGLE_TOL) {
+            float quality = clamp(1f - aErr / ANGLE_TOL, 0f, 1f);
+            if (timed) quality = Math.min(1f, quality + 0.15f);
+            if (err < -8 && quality < 0.65f && delivery.equals("SHORT")) {
                 lastWicket = true;
                 lastRuns = 0;
                 wickets++;
@@ -208,10 +193,11 @@ public class BoundaryModel {
                 balls++;
                 ballLog.add(lastRuns == 0 ? "0" : String.valueOf(lastRuns));
                 distM = Math.round(dist / 10f);
-                float ang = (float) (random.nextFloat() * 0.9 - 0.45) + (batX - ballX) / width * 0.8f;
-                dirDeg = 90 + Math.round(ang * 90);
+                float ang = (float) Math.toRadians(batAngle) + (random.nextFloat() - 0.5f) * 0.5f;
+                dirDeg = 90 + Math.round((float) Math.toDegrees(ang));
                 resultTitle = lastRuns == 6 ? "SIX." : lastRuns == 4 ? "FOUR!" : lastRuns + " RUN" + (lastRuns > 1 ? "S" : "");
                 resultSub = lastRuns == 6 ? "Over the rope. Into the stands." : lastRuns == 4 ? "Raced to the fence." : "Into the gap.";
+                timingLabel = quality >= 0.75f ? "PERFECT" : quality >= 0.4f ? "GOOD" : (err < 0 ? "EARLY" : "LATE");
                 popup = "+" + lastRuns;
                 popupUntil = now + 1500;
                 hitDist = dist;
@@ -231,12 +217,33 @@ public class BoundaryModel {
                 phaseTimer = 0;
             }
         } else {
-            resultTitle = "SWING AND MISS";
-            resultSub = "Ball passed safely outside the bat.";
-            timingLabel = timingLabel.isEmpty() ? "LATE" : timingLabel;
             lastRuns = 0;
             lastWicket = false;
+            balls++;
+            ballLog.add("0");
+            resultTitle = "DOT BALL";
+            resultSub = "JUST MISSED. Bat angle did not meet the ball. Next ball.";
+            timingLabel = "NO CONTACT";
+            popup = "dot";
+            popupUntil = now + 1200;
+            if (balls >= MAX_BALLS || wickets >= MAX_WICKETS) {
+                gameOver = true;
+            }
+            phase = Phase.RESULT;
+            phaseTimer = 0;
         }
+    }
+
+    // SWING button / flick: play the ball NOW with the current bat angle
+    public synchronized void strike() {
+        if (phase != Phase.BOWLING || !ballLive) {
+            return;
+        }
+        if (ballY < pitchY + 6 || ballY > batLineY()) {
+            swing = 1f;
+            return;
+        }
+        resolveContact(true);
     }
 
     public static int bandRuns(float dist) {
@@ -255,26 +262,10 @@ public class BoundaryModel {
         return 6;
     }
 
-    private void endBallDot() {
-        lastRuns = 0;
-        lastWicket = false;
-        balls++;
-        ballLog.add("0");
-        resultTitle = "DOT BALL";
-        resultSub = "JUST MISSED. No contact. No runs. Next ball.";
-        timingLabel = "NO SWING";
-        popup = "dot";
-        popupUntil = now + 1200;
-        if (balls >= MAX_BALLS || wickets >= MAX_WICKETS) {
-            gameOver = true;
-        }
-        phase = Phase.RESULT;
-        phaseTimer = 0;
-    }
-
     public synchronized void update(long dtMs) {
         now += dtMs;
-        batX += (batTargetX - batX) * 0.22f; // EMA: bat glides, never shakes
+        batAngle += (batAngleTarget - batAngle) * 0.25f; // EMA: angle glides, never shakes
+        batX = width / 2f; // batsman constant in one place
         if (swing > 0) {
             swing = Math.max(0, swing - dtMs / 180f);
         }
@@ -292,16 +283,12 @@ public class BoundaryModel {
             case BOWLING:
                 ballX += ballVX * dtMs / 1000f;
                 ballY += ballVY * dtMs / 1000f;
-                ballVY += 900 * dtMs / 1000f; // gravity so the pitch bounce arcs
                 if (!bounced && ballY >= pitchY) {
-                    bounced = true;
-                    ballY = pitchY;
-                    ballVY = -Math.abs(ballVY) * 0.38f; // bounce up off the pitch
-                    ballVX *= 0.92f;
+                    bounced = true; // pitch bounce (visual pulse in the view)
                 }
                 if (ballY >= batLineY()) {
                     ballLive = false;
-                    endBallDot();
+                    resolveContact(false); // automatic: bat angle meets the ball or dot
                 }
                 break;
             case FLYING:
@@ -349,6 +336,14 @@ public class BoundaryModel {
 
     public synchronized float getSwingDir() {
         return swingDir;
+    }
+
+    public synchronized float getBatAngle() {
+        return batAngle;
+    }
+
+    public synchronized float getBatAngleTarget() {
+        return batAngleTarget;
     }
 
     public synchronized int getRuns() {
