@@ -111,14 +111,14 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
             }
             int[] d = mapper.feedGyro(event.values[0] - baseX, event.values[1] - baseY, event.values[2] - baseZ, event.timestamp);
             if (d != null && (d[0] != 0 || d[1] != 0)) {
-                send("MOVE " + d[0] + " " + d[1]);
+                send("MOVE " + d[0] + " " + d[1]); // tilt = bat angle only
             }
         } else if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
             long t = event.timestamp;
             if (panelPlay.getVisibility() == View.VISIBLE && t - lastAccel > 350_000_000L) {
                 float mag = (float) Math.sqrt(event.values[0] * event.values[0] + event.values[1] * event.values[1] + event.values[2] * event.values[2]);
                 if (lastAccelMag > 0 && mag - lastAccelMag > 18f) {
-                    send("SWING"); // sharp flick = stroke
+                    send("SWING"); // sharp flick = deliberate shot
                 }
                 lastAccelMag = mag;
                 lastAccel = t;
@@ -197,7 +197,7 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
                     calibrated = true;
                     mapper.reset();
                     playStatus.setText("CONNECTED TO " + host.toUpperCase());
-                    playHint.setText("01 Calibration complete — Neutral position saved. Ready for your first ball.\nYour bat is ready. Eyes on the TV. Phone held securely.\n120° FORWARD HITTING ZONE — swing through the ball. Move phone to place the bat, SWING (or flick) to strike.");
+                    playHint.setText("01 Calibration complete — Neutral position saved. Ready for your first ball.\nYour bat is ready. Eyes on the TV. Phone held securely.\nTilt the phone left/right to angle the bat (120° forward zone). The shot fires automatically when the bat meets the ball. SWING button / flick = deliberate shot.");
                     showPanel(panelPlay);
                     send("PING");
                     return;
@@ -234,7 +234,7 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
                                 return;
                             }
                             playScore.setText(r[0]);
-                            playHint.setText(r[1] + "\nMove phone = place bat · SWING button or quick flick = strike (approximate is fine)");
+                            playHint.setText(r[1] + "\nTilt phone = bat angle (±60°) · auto-fires on contact · SWING button/flick = deliberate shot");
                         }
                     });
                 } catch (final Exception e) {
