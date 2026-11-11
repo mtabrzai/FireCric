@@ -193,7 +193,7 @@ public class BoundaryView extends View {
             case RUNUP:
             case BOWLING:
                 phaseLabel = "BALL IN PLAY";
-                hint = "WATCH THE BALL — Time your swing. Find the gap.";
+                hint = "WATCH THE BALL — angle the bat to meet it. It fires on contact.";
                 break;
             case FLYING:
                 phaseLabel = "SHOT IN FLIGHT";
@@ -226,7 +226,7 @@ public class BoundaryView extends View {
         overlay.setColor(0xB3060F0E);
         canvas.drawRect(0, 100, w, h, overlay);
         text(canvas, white, 64, "Your phone. Your bat. Your big moment.", 80, 300);
-        text(canvas, muted, 30, "Step up to the crease. Swing your phone to send the ball racing through the field.", 80, 350);
+        text(canvas, muted, 30, "Step up to the crease. Tilt your phone to angle the bat — it fires when the bat meets the ball.", 80, 350);
         text(canvas, white, 54, BoundaryModel.MAX_OVERS + " OVERS", 80, 470);
         text(canvas, muted, 28, BoundaryModel.MAX_BALLS + " balls. Make every swing count.", 80, 512);
         text(canvas, muted, 26, "Keep a clear space around you. Hold your phone securely.", 80, h - 40);
@@ -306,7 +306,7 @@ public class BoundaryView extends View {
         // bowler runs in during RUNUP, scales up as he approaches the crease
         drawBowler(canvas, m, w, h, horizon);
 
-        // batsman at the crease, bat in hand (larger, closer to camera)
+        // batsman FIXED at the crease, bat in hand pivots on angle
         drawBatsman(canvas, m, m.getBatX(), batLine);
 
         // pitch marker
@@ -317,7 +317,7 @@ public class BoundaryView extends View {
             canvas.drawCircle(m.pitchX, m.pitchY, pr, pm);
         }
 
-        // ball with perspective scale + ground shadow + trail
+        // ball: 3x bigger near the bat, ground shadow, trail, bounce pulse
         float bx2, by2;
         if (m.getPhase() == BoundaryModel.Phase.FLYING) {
             bx2 = m.hitX;
@@ -337,11 +337,18 @@ public class BoundaryView extends View {
             return;
         }
         float depth = Math.max(0f, Math.min(1f, by2 / h));
-        float br = 7 + depth * 13;
+        float br = 12 + depth * 22; // ~3x bigger as it reaches the bat (~30 px at 1080p)
+        if (m.bounced && m.isBallLive()) {
+            Paint bp = new Paint(Paint.ANTI_ALIAS_FLAG);
+            bp.setColor(0xFFD7FF67);
+            bp.setStyle(Paint.Style.STROKE);
+            bp.setStrokeWidth(3f);
+            float pr = 8 + 6 * (m.ballY / h);
+            canvas.drawCircle(m.pitchX, m.pitchY, pr + 10, bp); // bounce pulse at the pitch marker
+        }
         Paint sh = new Paint(Paint.ANTI_ALIAS_FLAG);
         sh.setColor(0x66000000);
         float groundY = Math.min(by2, batLine + 30);
-        float air = Math.max(0f, (groundY - by2) / (batLine - horizon + 1));
         canvas.drawOval(bx2 - br * 1.1f, groundY - br * 0.25f, bx2 + br * 1.1f, groundY + br * 0.25f, sh);
         ballPaint.setShader(new RadialGradient(bx2 - br * 0.3f, by2 - br * 0.3f, br,
                 new int[]{0xFFFFAC77, 0xFFF15D4D, 0xFFD33B40}, null, Shader.TileMode.CLAMP));
@@ -375,21 +382,24 @@ public class BoundaryView extends View {
     private void drawBatsman(Canvas canvas, BoundaryModel m, float px, float batLine) {
         float s = 1.5f; // close to camera
         drawFigure(canvas, px, batLine - 92 * s, s, 0xFFF6F8EE);
-        // bat in hand: hangs down at rest, sweeps a full stroke arc on swing
+        // bat pivots at the hands on the bat ANGLE (0 = straight at the bowler);
+        // a stroke adds a brief follow-through sweep in the swing direction
         float sw = m.getSwing();
-        float dir = m.getSwingDir();
-        float p = 1f - sw; // 0 at backlift -> 1 at follow-through
-        float ang = (float) Math.toRadians(-150 + p * 240);
+        float eff = m.getBatAngle() + sw * 45f * m.getSwingDir();
+        float ang = (float) Math.toRadians(eff);
         float hx = px, hy = batLine - 58 * s;
-        float len = 88 * s;
-        float tipX = hx + (float) Math.sin(ang) * len * dir;
+        float len = 105 * s * 0.75f; // ~105 px at 1920w, per design
+        float tipX = hx + (float) Math.sin(ang) * len;
         float tipY = hy - (float) Math.cos(ang) * len;
-        batPaint.setStrokeWidth(15f * s);
+        batPaint.setColor(0xFFF6F8EE); // white bat line per design
+        batPaint.setStrokeWidth(13f * s);
         canvas.drawLine(hx, hy, tipX, tipY, batPaint);
-        Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
-        edge.setColor(0xFFF6F8EE);
-        edge.setStrokeWidth(3f * s);
-        canvas.drawLine(hx + (tipX - hx) * 0.7f, hy + (tipY - hy) * 0.7f, tipX, tipY, edge);
+        // 120° forward hitting zone arc around the bat
+        Paint zone = new Paint(Paint.ANTI_ALIAS_FLAG);
+        zone.setColor(0x66D7FF67);
+        zone.setStyle(Paint.Style.STROKE);
+        zone.setStrokeWidth(3f);
+        canvas.drawArc(hx - len, hy - len, hx + len, hy + len, -150, 120, false, zone);
     }
 
     private void drawDeliveryTag(Canvas canvas, BoundaryModel m, int w, int h) {
