@@ -8,8 +8,8 @@ import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
 
-    private static final int TCP_PORT = 8769;
-    private static final int UDP_PORT = 8770;
+    private static final int TCP_PORT = 8771;
+    private static final int UDP_PORT = 8772;
     private static final long PHONE_TIMEOUT_MS = 6000;
 
     private BoundaryView gameView;
