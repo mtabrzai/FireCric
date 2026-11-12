@@ -8,10 +8,8 @@ import android.view.View;
 import java.util.List;
 
 /**
- * 2D overlay on top of the 3D scene: top/bottom HUD bars and the designed
- * panels (lobby, delivery tag, contact ring, result, game over, paused).
- * Also renders a 2D fallback field that replicates the 3D visual when OpenGL
- * is unavailable (field2D).
+ * 2D overlay on top of the 3D scene: HUD bars + designed panels, plus a 2D fallback
+ * field that replicates the 3D visual when OpenGL is unavailable (field2D).
  */
 public class HudView extends View {
 
@@ -274,13 +272,11 @@ public class HudView extends View {
         if (bg3d == null) {
             bg3d = android.graphics.BitmapFactory.decodeResource(getResources(), R.drawable.bg_3d);
         }
-        // stadium backdrop (crowd, floodlights, sky) exactly like the design visual
         if (bg3d != null) {
             canvas.drawBitmap(bg3d, null, new android.graphics.Rect(0, 0, w, h), null);
         } else {
             canvas.drawColor(0xFF0A1F14);
         }
-        // vignette + top shade for HUD readability
         android.graphics.Paint vg = new android.graphics.Paint();
         android.graphics.RadialGradient rg = new android.graphics.RadialGradient(
                 w / 2f, h * 0.55f, h * 0.95f,
@@ -291,7 +287,6 @@ public class HudView extends View {
         top.setColor(0x66060F0E);
         canvas.drawRect(0, 0, w, 110, top);
 
-        // pitch strip: horizontal perspective trapezoid across the lower half (as in the visual)
         float farY = h * 0.50f, nearY = h * 0.88f;
         android.graphics.Paint pitch = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         pitch.setColor(0xFFC9A96F);
@@ -314,7 +309,6 @@ public class HudView extends View {
             canvas.drawPath(b, pitch);
         }
 
-        // batsman at the crease (right-center, like the visual), detailed kit
         float bx = w * 0.64f, by = h * 0.88f, s = h / 860f;
         android.graphics.Paint sh = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         sh.setColor(0x55000000);
@@ -327,41 +321,53 @@ public class HudView extends View {
         }
         Paint kit = new Paint(Paint.ANTI_ALIAS_FLAG);
         kit.setStrokeCap(Paint.Cap.ROUND);
-        kit.setColor(0xFFF2F2F2); // pads
+        kit.setColor(0xFFF2F2F2);
         kit.setStrokeWidth(16 * s);
         canvas.drawLine(bx - 14 * s, by - 120 * s, bx - 22 * s, by - 8 * s, kit);
         canvas.drawLine(bx + 14 * s, by - 120 * s, bx + 26 * s, by - 8 * s, kit);
-        kit.setColor(0xFF1E5AA8); // blue jersey
+        kit.setColor(0xFF1E5AA8);
         kit.setStrokeWidth(34 * s);
         canvas.drawLine(bx, by - 210 * s, bx, by - 118 * s, kit);
-        kit.setColor(0xFFFF7A1A); // orange stripe
+        kit.setColor(0xFFFF7A1A);
         kit.setStrokeWidth(8 * s);
         canvas.drawLine(bx + 14 * s, by - 205 * s, bx + 14 * s, by - 125 * s, kit);
-        kit.setColor(0xFF1E5AA8); // arms
+        kit.setColor(0xFF1E5AA8);
         kit.setStrokeWidth(12 * s);
         canvas.drawLine(bx - 12 * s, by - 195 * s, bx - 34 * s, by - 160 * s, kit);
         canvas.drawLine(bx + 12 * s, by - 195 * s, bx + 36 * s, by - 168 * s, kit);
-        kit.setColor(0xFFFFF3D2); // glove
+        kit.setColor(0xFFFFF3D2);
         canvas.drawCircle(bx + 36 * s, by - 168 * s, 9 * s, kit);
-        kit.setColor(0xFF2E6BD6); // helmet
+        kit.setColor(0xFF2E6BD6);
         canvas.drawCircle(bx, by - 232 * s, 20 * s, kit);
-        kit.setColor(0xFF0F2E5C); // helmet peak
+        kit.setColor(0xFF0F2E5C);
         canvas.drawRect(bx - 20 * s, by - 232 * s, bx + 20 * s, by - 224 * s, kit);
-        // bat: brown, angled back at stance; swings across on stroke (angle-driven)
-        float ang = (float) Math.toRadians(35 + m.getBatAngle() * 0.9 + m.getSwing() * 120f * m.getSwingDir());
+        // bat: 3D-look swing = foreshortened ghost trail + arc (not a flat 2D rotation)
+        float baseAng = (float) Math.toRadians(35 + m.getBatAngle() * 0.9);
+        float sw = m.getSwing();
+        float dir = m.getSwingDir();
         float hx = bx + 30 * s, hy = by - 170 * s;
-        float len = 150 * s;
         Paint bat = new Paint(Paint.ANTI_ALIAS_FLAG);
-        bat.setColor(0xFFC08A4E);
         bat.setStrokeCap(Paint.Cap.ROUND);
-        bat.setStrokeWidth(13 * s);
-        canvas.drawLine(hx, hy, hx + (float) Math.sin(ang) * len, hy + (float) Math.cos(ang) * len, bat);
+        for (int k = 3; k >= 0; k--) {
+            if (k > 0 && sw <= 0) break;
+            float ang = baseAng + (sw * 120f - k * 18f * (sw > 0 ? dir : 0)) * (float) Math.PI / 180f;
+            float foreshorten = 1f - 0.5f * Math.abs((float) Math.sin(ang));
+            float len = 150 * s * foreshorten;
+            int alpha = k == 0 ? 255 : (int) (90 - k * 25);
+            bat.setColor(0xFFC08A4E);
+            bat.setAlpha(alpha);
+            bat.setStrokeWidth((k == 0 ? 13f : 11f) * s * (0.7f + 0.3f * foreshorten));
+            canvas.drawLine(hx, hy, hx + (float) Math.sin(ang) * len, hy + (float) Math.cos(ang) * len, bat);
+        }
+        float ang0 = baseAng + sw * 120f * dir * (float) Math.PI / 180f;
+        float fs0 = 1f - 0.5f * Math.abs((float) Math.sin(ang0));
+        float len0 = 150 * s * fs0;
         bat.setColor(0xFFE8C79A);
+        bat.setAlpha(255);
         bat.setStrokeWidth(5 * s);
-        canvas.drawLine(hx + (float) Math.sin(ang) * len * 0.55f, hy + (float) Math.cos(ang) * len * 0.55f,
-                hx + (float) Math.sin(ang) * len, hy + (float) Math.cos(ang) * len, bat);
+        canvas.drawLine(hx + (float) Math.sin(ang0) * len0 * 0.55f, hy + (float) Math.cos(ang0) * len0 * 0.55f,
+                hx + (float) Math.sin(ang0) * len0, hy + (float) Math.cos(ang0) * len0, bat);
 
-        // bowler: small red figure in the background, runs in during RUNUP
         if (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING) {
             float runT = m.getPhase() == BoundaryModel.Phase.RUNUP ? 0.4f : 1f;
             float px = w * (0.78f - runT * 0.06f), py = h * (0.50f + runT * 0.04f), ps = h / 860f * 0.55f;
@@ -376,15 +382,22 @@ public class HudView extends View {
             canvas.drawCircle(px, py - 72 * ps, 9 * ps, bw);
         }
 
-        // ball: maps model coords onto the pitch, ground shadow, bigger near the bat
         if (m.isBallLive() || m.getPhase() == BoundaryModel.Phase.FLYING) {
             float t = m.getPhase() == BoundaryModel.Phase.FLYING ? 1f
                     : Math.max(0f, Math.min(1f, (m.ballY - 90f) / Math.max(1f, m.batLineY() - 90f)));
             float sx = w * (0.51f + (m.getPhase() == BoundaryModel.Phase.FLYING ? (m.hitX - 960f) / 960f * 0.3f : (m.ballX - 960f) / 960f * 0.3f));
             float sy = h * (0.52f + t * 0.34f) + (m.getPhase() == BoundaryModel.Phase.FLYING ? (m.hitY / 1080f) * h * 0.2f : 0f);
+            // 3D bounce: arcs up after the pitch; shadow shrinks and fades with height
+            float airUp = 0f;
+            if (m.getPhase() == BoundaryModel.Phase.BOWLING && m.bounced) {
+                float bp = Math.max(0f, Math.min(1f, (m.pitchY - m.ballY) / Math.max(1f, m.pitchY - m.batLineY())));
+                airUp = (float) Math.sin(bp * Math.PI) * h * 0.07f;
+                sy -= airUp;
+            }
             float br = (10 + t * 18);
+            float shScale = Math.max(0.45f, 1f - airUp / (h * 0.07f) * 0.5f);
             sh.setColor(0x44000000);
-            canvas.drawOval(sx - br, sy + br * 0.7f, sx + br, sy + br * 1.05f, sh);
+            canvas.drawOval(sx - br * shScale, sy + airUp + br * 0.7f, sx + br * shScale, sy + airUp + br * 1.05f, sh);
             Paint ball = new Paint(Paint.ANTI_ALIAS_FLAG);
             ball.setColor(0xFFD33B40);
             canvas.drawCircle(sx, sy, br, ball);
