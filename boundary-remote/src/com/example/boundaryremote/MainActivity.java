@@ -14,8 +14,8 @@ import android.widget.TextView;
 
 public class MainActivity extends Activity implements View.OnClickListener, SensorEventListener {
 
-    private static final int TCP_PORT = 8769;
-    private static final int UDP_PORT = 8770;
+    private static final int TCP_PORT = 8771;
+    private static final int UDP_PORT = 8772;
 
     private View panelConnect;
     private View panelCalibrate;
@@ -64,6 +64,15 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
         findViewById(R.id.btn_pause).setOnClickListener(this);
         findViewById(R.id.btn_reset).setOnClickListener(this);
         showPanel(panelConnect);
+        connectStatus.setText("Searching for your Fire TV…");
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (panelConnect.getVisibility() == View.VISIBLE && host.length() == 0) {
+                    discover();
+                }
+            }
+        }, 800);
     }
 
     private void showPanel(View p) {
@@ -71,6 +80,16 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
         panelCalibrate.setVisibility(p == panelCalibrate ? View.VISIBLE : View.GONE);
         panelPlay.setVisibility(p == panelPlay ? View.VISIBLE : View.GONE);
     }
+
+    private final Runnable keepalive = new Runnable() {
+        @Override
+        public void run() {
+            if (panelPlay.getVisibility() == View.VISIBLE && host.length() > 0) {
+                send("PING"); // quiet keepalive so the TV watchdog never false-pauses
+            }
+            handler.postDelayed(this, 3000);
+        }
+    };
 
     @Override
     protected void onResume() {
@@ -86,6 +105,7 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
                 sensorManager.registerListener(this, accel, SensorManager.SENSOR_DELAY_GAME);
             }
         }
+        handler.postDelayed(keepalive, 3000);
     }
 
     @Override
@@ -93,6 +113,7 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
         if (sensorManager != null) {
             sensorManager.unregisterListener(this);
         }
+        handler.removeCallbacks(keepalive);
         handler.removeCallbacksAndMessages(null);
         super.onPause();
     }
@@ -171,7 +192,7 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
                     handler.post(new Runnable() {
                         @Override
                         public void run() {
-                            connectStatus.setText("No Fire TV found — enter its IP manually (shown on the TV)");
+                            connectStatus.setText("No Fire TV found — enter its IP manually (shown on the TV lobby)");
                         }
                     });
                 }
@@ -242,7 +263,8 @@ public class MainActivity extends Activity implements View.OnClickListener, Sens
                         @Override
                         public void run() {
                             TextView where = panelConnect.getVisibility() == View.VISIBLE ? connectStatus : playStatus;
-                            where.setText("Connection failed: " + e.getMessage() + " — check same Wi-Fi");
+                            where.setText("Can't reach " + host + ":" + TCP_PORT + " — is the Boundary app open on the TV? Same Wi-Fi? Retrying Find TV…");
+                            handler.postDelayed(new Runnable() { public void run() { discover(); } }, 1500);
                         }
                     });
                 }
