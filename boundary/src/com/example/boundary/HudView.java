@@ -10,6 +10,7 @@ import java.util.List;
 /**
  * 2D overlay on top of the 3D scene: top/bottom HUD bars and the designed
  * panels (lobby, delivery tag, contact ring, result, game over, paused).
+ * Also renders a 2D fallback field when OpenGL is unavailable (field2D).
  */
 public class HudView extends View {
 
@@ -21,6 +22,7 @@ public class HudView extends View {
     public volatile int rxCount;
     public volatile boolean phoneConnected = true;
     public volatile boolean everConnected;
+    public volatile boolean field2D; // GL fallback
 
     private final Paint white = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint muted = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -71,6 +73,9 @@ public class HudView extends View {
         if (phase == BoundaryModel.Phase.LOBBY) {
             drawLobby(canvas, w, h);
         } else {
+            if (field2D) {
+                drawField2D(canvas, m, w, h);
+            }
             if (phase == BoundaryModel.Phase.BOWLING || phase == BoundaryModel.Phase.RUNUP) {
                 drawDeliveryTag(canvas, m, w, h);
             }
@@ -259,5 +264,44 @@ public class HudView extends View {
         centerText(canvas, muted, 24, "02  Check both devices are on the same Wi-Fi.", w / 2f, h * 0.61f);
         centerText(canvas, lime, 30, "WAITING FOR YOUR PHONE", w / 2f, h * 0.72f);
         centerText(canvas, white, 26, m.scoreText() + "  -  " + m.oversText() + " overs  -  delivery not counted", w / 2f, h * 0.78f);
+    }
+
+    // ---- 2D fallback field (used only if OpenGL is unavailable on the device) ----
+    private void drawField2D(Canvas canvas, BoundaryModel m, int w, int h) {
+        canvas.drawColor(0xFF123B22);
+        float batLine = h * 0.84f;
+        android.graphics.Paint pitch = new android.graphics.Paint();
+        pitch.setColor(0xFFD7B98A);
+        android.graphics.Path p = new android.graphics.Path();
+        p.moveTo(w / 2f - 34, h * 0.30f);
+        p.lineTo(w / 2f + 34, h * 0.30f);
+        p.lineTo(w / 2f + w * 0.13f, batLine + 40);
+        p.lineTo(w / 2f - w * 0.13f, batLine + 40);
+        p.close();
+        canvas.drawPath(p, pitch);
+        Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+        line.setColor(0xFFF6F8EE);
+        line.setStrokeWidth(4f);
+        canvas.drawLine(w / 2f - w * 0.05f, batLine, w / 2f + w * 0.05f, batLine, line);
+        Paint fig = new Paint(Paint.ANTI_ALIAS_FLAG);
+        fig.setColor(0xFFD7FF67);
+        fig.setStrokeWidth(9f);
+        canvas.drawCircle(w / 2f, h * 0.28f, 14, fig);
+        fig.setColor(0xFFF6F8EE);
+        canvas.drawCircle(w / 2f, batLine - 130, 22, fig);
+        float ang = (float) Math.toRadians(m.getBatAngle() + m.getSwing() * 45f * m.getSwingDir());
+        float hx = w / 2f, hy = batLine - 80;
+        float len = 110;
+        Paint bat = new Paint(Paint.ANTI_ALIAS_FLAG);
+        bat.setColor(0xFFF6F8EE);
+        bat.setStrokeWidth(13f);
+        canvas.drawLine(hx, hy, hx + (float) Math.sin(ang) * len, hy - (float) Math.cos(ang) * len, bat);
+        float bx = m.isBallLive() || m.getPhase() == BoundaryModel.Phase.FLYING ? (m.getPhase() == BoundaryModel.Phase.FLYING ? m.hitX : m.ballX) : -100;
+        float by = m.getPhase() == BoundaryModel.Phase.FLYING ? m.hitY : m.ballY;
+        if (bx > 0) {
+            Paint ball = new Paint(Paint.ANTI_ALIAS_FLAG);
+            ball.setColor(0xFFF15D4D);
+            canvas.drawCircle(bx, by, 16, ball);
+        }
     }
 }
