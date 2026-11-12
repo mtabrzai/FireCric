@@ -29,12 +29,17 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         model = new BoundaryModel(1920, 1080);
-        glView = new GlSceneView(this);
-        glView.setModel(model);
         hudView = new HudView(this);
         hudView.setModel(model);
         FrameLayout root = new FrameLayout(this);
-        root.addView(glView, new FrameLayout.LayoutParams(-1, -1));
+        try {
+            glView = new GlSceneView(this);
+            glView.setModel(model);
+            root.addView(glView, new FrameLayout.LayoutParams(-1, -1));
+        } catch (Throwable t) {
+            glView = null; // GL unavailable -> 2D fallback field in HudView
+            hudView.field2D = true;
+        }
         root.addView(hudView, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
         startLoop();
@@ -48,10 +53,13 @@ public class MainActivity extends Activity {
             public void run() {
                 long last = System.currentTimeMillis();
                 while (running) {
-                    long now = System.currentTimeMillis();
-                    model.update(now - last);
-                    last = now;
-                    hudView.postInvalidate();
+                    try {
+                        long now = System.currentTimeMillis();
+                        model.update(now - last);
+                        last = now;
+                        hudView.postInvalidate();
+                    } catch (Throwable ignored) {
+                    }
                     try {
                         Thread.sleep(16);
                     } catch (InterruptedException e) {
