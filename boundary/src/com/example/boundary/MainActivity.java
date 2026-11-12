@@ -2,6 +2,7 @@ package com.example.boundary;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.widget.FrameLayout;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -12,8 +13,13 @@ public class MainActivity extends Activity {
     private static final int UDP_PORT = 8772;
     private static final long PHONE_TIMEOUT_MS = 6000;
 
-    private BoundaryView gameView;
+    private GlSceneView glView;
+    private HudView hudView;
+    private BoundaryModel model;
+    private Thread loopThread;
+    private volatile boolean running;
     private RemoteServer server;
+    private String remoteBase = "";
     private int rxCount;
     private volatile long lastRxTime;
     private volatile boolean everRx;
@@ -22,9 +28,40 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        gameView = new BoundaryView(this);
-        setContentView(gameView);
+        model = new BoundaryModel(1920, 1080);
+        glView = new GlSceneView(this);
+        glView.setModel(model);
+        hudView = new HudView(this);
+        hudView.setModel(model);
+        FrameLayout root = new FrameLayout(this);
+        root.addView(glView, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(hudView, new FrameLayout.LayoutParams(-1, -1));
+        setContentView(root);
+        startLoop();
         startWatchdog();
+    }
+
+    private void startLoop() {
+        running = true;
+        loopThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                long last = System.currentTimeMillis();
+                while (running) {
+                    long now = System.currentTimeMillis();
+                    model.update(now - last);
+                    last = now;
+                    hudView.postInvalidate();
+                    try {
+                        Thread.sleep(16);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            }
+        }, "boundary-loop");
+        loopThread.setDaemon(true);
+        loopThread.start();
     }
 
     @Override
@@ -44,6 +81,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        running = false;
         if (server != null) {
             server.stop();
         }
@@ -61,8 +99,8 @@ public class MainActivity extends Activity {
                         return;
                     }
                     boolean connected = !everRx || (System.currentTimeMillis() - lastRxTime) < PHONE_TIMEOUT_MS;
-                    gameView.phoneConnected = connected;
-                    gameView.everConnected = everRx;
+                    hudView.phoneConnected = connected;
+                    hudView.everConnected = everRx;
                 }
             }
         }, "watchdog").start();
@@ -82,9 +120,10 @@ public class MainActivity extends Activity {
         if (server != null) {
             return;
         }
-        String ip = RemoteServer.getLocalIp();
-        gameView.pairingCode = pairingCode(ip);
-        gameView.ipText = ip != null ? ip : "unknown";
+        final String ip = RemoteServer.getLocalIp();
+        remoteBase = ip != null ? ip : "unknown";
+        hudView.pairingCode = pairingCode(ip);
+        hudView.ipText = remoteBase;
         server = new RemoteServer(TCP_PORT, UDP_PORT, new RemoteServer.CommandHandler() {
             @Override
             public String[] handle(final String token) {
@@ -101,7 +140,7 @@ public class MainActivity extends Activity {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                BoundaryModel m = gameView.getModel();
+                BoundaryModel m = model;
                 if (m == null) {
                     return new String[]{"…", ""};
                 }
@@ -118,7 +157,7 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            gameView.serverError = msg;
+                            hudView.serverError = msg;
                         }
                     });
                 }
@@ -133,9 +172,9 @@ public class MainActivity extends Activity {
         long now = System.currentTimeMillis();
         if (now - lastStatusUpdate > 500) {
             lastStatusUpdate = now;
-            gameView.rxCount = rxCount;
+            hudView.rxCount = rxCount;
         }
-        BoundaryModel m = gameView.getModel();
+        BoundaryModel m = model;
         if (m == null) {
             return;
         }
