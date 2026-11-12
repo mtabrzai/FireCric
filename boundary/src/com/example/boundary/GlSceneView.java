@@ -21,8 +21,9 @@ import javax.microedition.khronos.opengles.GL10;
 /**
  * Real 3D in-play scene (OpenGL ES 2.0): broadcast-style camera beside the pitch,
  * stadium backdrop (bg_3d.png, extracted from the design), lit 3D batsman with a 3D bat
- * that swings on the model's bat angle, bowler run-up, bouncing ball (sphere) with
- * blob shadows. HUD/panels live in HudView on top.
+ * that swings in 3D (yaw + pitch + roll with ghost trail) on the model's bat angle,
+ * bowler run-up, bouncing sphere ball whose shadow shrinks with height.
+ * HUD/panels live in HudView on top.
  */
 public class GlSceneView extends GLSurfaceView {
 
@@ -87,7 +88,6 @@ public class GlSceneView extends GLSurfaceView {
         public void onSurfaceChanged(GL10 gl, int w, int h) {
             GLES20.glViewport(0, 0, w, h);
             Matrix.perspectiveM(proj, 0, 55f, (float) w / h, 0.1f, 120f);
-            // camera: low, beside the pitch at the batsman end, looking down the pitch
             Matrix.setLookAtM(view, 0,
                     4.2f, 1.7f, 3.4f,
                     0f, 1.1f, -8f,
@@ -120,7 +120,7 @@ public class GlSceneView extends GLSurfaceView {
 
             float batAng = model.getBatAngle();
             float sw = model.getSwing();
-            float swingSweep = sw * 55f * model.getSwingDir();
+            float swingSweep = sw * 100f * model.getSwingDir();
             drawBatsman(0f, 0f, batAng, swingSweep);
 
             for (int i = -1; i <= 1; i++) {
@@ -141,7 +141,8 @@ public class GlSceneView extends GLSurfaceView {
             }
             boolean ballVisible = model.isBallLive() || model.getPhase() == BoundaryModel.Phase.FLYING;
             if (ballVisible) {
-                drawBlob(wx, wz, 0.22f + wy * 0.1f);
+                float air = Math.max(0f, wy - 0.12f);
+                drawBlob(wx, wz, Math.max(0.08f, 0.22f - air * 0.12f), Math.max(0.08f, 0.35f - air * 0.3f));
                 drawMesh(sphere, wx, wy, wz, 1f, 0.95f, 0.25f, 0.2f, ballTex, 1f);
                 GLES20.glEnable(GLES20.GL_BLEND);
                 GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
@@ -204,7 +205,9 @@ public class GlSceneView extends GLSurfaceView {
             drawMeshTex(Mesh.quad(), m, 1f, 1f, 0.95f, whiteTex, 1f);
         }
 
-        private void drawBlob(float x, float z, float r) {
+        private void drawBlob(float x, float z, float r) { drawBlob(x, z, r, 0.35f); }
+
+        private void drawBlob(float x, float z, float r, float alpha) {
             GLES20.glEnable(GLES20.GL_BLEND);
             GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
             Matrix.setIdentityM(m, 0);
@@ -212,7 +215,7 @@ public class GlSceneView extends GLSurfaceView {
             Matrix.rotateM(m, 0, -90f, 1f, 0f, 0f);
             Matrix.scaleM(m, 0, r, r, 1f);
             GLES20.glUniformMatrix4fv(uModel, 1, false, m, 0);
-            GLES20.glUniform4f(uColor, 0f, 0f, 0f, 0.35f);
+            GLES20.glUniform4f(uColor, 0f, 0f, 0f, alpha);
             GLES20.glUniform1f(uUseTex, 1f);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, whiteTex);
             Mesh.circle().draw(aPos, aNormal, aTex);
@@ -234,13 +237,30 @@ public class GlSceneView extends GLSurfaceView {
 
         private void drawBatsman(float x, float z, float batAngDeg, float swingSweep) {
             drawFigure(x, z, 1.0f, 0.15f, 0.35f, 0.95f); // blue kit, fixed at the crease
+            float dir = swingSweep >= 0 ? 1f : -1f;
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            for (int k = 3; k >= 1; k--) {
+                float ghost = swingSweep - dir * k * 16f;
+                drawBat(x, z, batAngDeg, ghost, 0.10f + 0.08f * (3 - k));
+            }
+            GLES20.glDisable(GLES20.GL_BLEND);
+            drawBat(x, z, batAngDeg, swingSweep, 1f);
+        }
+
+        private void drawBat(float x, float z, float batAngDeg, float sweep, float alpha) {
             Matrix.setIdentityM(m, 0);
-            Matrix.translateM(m, 0, x + 0.3f, 1.25f, z + 0.15f); // hands
-            Matrix.rotateM(m, 0, -batAngDeg, 0f, 1f, 0f);          // aim left/right in 3D
-            Matrix.rotateM(m, 0, -swingSweep, 1f, 0f, 0f);         // 3D swing arc
+            Matrix.translateM(m, 0, x + 0.3f, 1.25f, z + 0.15f);   // hands
+            Matrix.rotateM(m, 0, -batAngDeg - sweep, 0f, 1f, 0f);  // 3D horizontal sweep (yaw)
+            Matrix.rotateM(m, 0, sweep * 0.35f, 1f, 0f, 0f);       // slight dip/rise (pitch)
+            Matrix.rotateM(m, 0, sweep * 0.2f, 0f, 0f, 1f);         // roll for a full 3D arc
             Matrix.translateM(m, 0, 0f, -0.55f, 0f);
             Matrix.scaleM(m, 0, 0.09f, 1.1f, 0.035f);
-            drawMeshTex(cube, m, 0.98f, 0.96f, 0.9f, whiteTex, 1f); // willow-white bat per design
+            GLES20.glUniformMatrix4fv(uModel, 1, false, m, 0);
+            GLES20.glUniform4f(uColor, 0.98f, 0.96f, 0.9f, alpha);
+            GLES20.glUniform1f(uUseTex, 1f);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, whiteTex);
+            cube.draw(aPos, aNormal, aTex);
         }
 
         private void drawMesh(Mesh mesh, float x, float y, float z, float s, float r, float g, float b, int tex, float useTex) {
@@ -403,7 +423,7 @@ public class GlSceneView extends GLSurfaceView {
             return fromArray(p, 36);
         }
 
-        static Mesh quad() { // XZ ground quad
+        static Mesh quad() {
             float[] p = {
                     -0.5f, 0, 0.5f, 0, 1, 0, 0, 0,
                     0.5f, 0, 0.5f, 0, 1, 0, 1, 0,
@@ -415,7 +435,7 @@ public class GlSceneView extends GLSurfaceView {
             return fromArray(p, 6);
         }
 
-        static Mesh quadXY() { // XY screen quad (background)
+        static Mesh quadXY() {
             float[] p = {
                     -0.5f, -0.5f, 0, 0, 0, 1, 0, 0,
                     0.5f, -0.5f, 0, 0, 0, 1, 1, 0,
@@ -427,7 +447,7 @@ public class GlSceneView extends GLSurfaceView {
             return fromArray(p, 6);
         }
 
-        static Mesh circle() { // XZ disc (blob shadow)
+        static Mesh circle() {
             int seg = 20;
             float[] p = new float[seg * 3 * 8];
             int idx = 0;
