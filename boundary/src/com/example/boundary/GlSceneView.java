@@ -79,6 +79,8 @@ public class GlSceneView extends GLSurfaceView {
         private boolean prevBounced;
         private float bounceT = -10f;
         private float spin;
+        private BoundaryModel.Phase prevPhase;
+        private float phaseSince;
 
         // smoothed camera
         private float fovCur = 55f;
@@ -157,6 +159,10 @@ public class GlSceneView extends GLSurfaceView {
             drawGround();
 
             BoundaryModel.Phase phase = model.getPhase();
+            if (phase != prevPhase) {
+                prevPhase = phase;
+                phaseSince = clockS;
+            }
             if (phase == BoundaryModel.Phase.LOBBY) {
                 return;
             }
@@ -190,9 +196,10 @@ public class GlSceneView extends GLSurfaceView {
             }
         }
 
-        // ---- run-up progress (model exposes only phase; 900 ms run-up) ----
+        // ---- run-up progress: animate across the model's 900 ms RUNUP phase ----
         private float modelRunT() {
-            return 0.35f; // same stance the previous version used mid run-up
+            float t = (clockS - phaseSince) / 0.9f; // model RUNUP lasts 900 ms
+            return clamp01(t);
         }
 
         // =====================================================================
@@ -396,11 +403,13 @@ public class GlSceneView extends GLSurfaceView {
                 float x = smooth(t / 0.45f);
                 yawOff = lerp(-55f, 5f, x);
                 elev = lerp(50f, -14f, x);
-                roll = lerp(38f, -6f, x);
+                roll = lerp(30f, -8f, x);
                 fwd = lerp(0.05f, 0.34f, x);
                 side = lerp(-0.18f, 0.02f, x);
                 lift = lerp(0.10f, -0.02f, x);
-                w = lerp(0.50f, 1.00f, x);
+                // v2.5: stance already points at ~85% of the commanded angle, so the
+                // visible blade tracks the tilt input closely and contact reads true
+                w = lerp(0.85f, 1.00f, x);
             } else {
                 float x = smooth((t - 0.45f) / 0.55f);
                 yawOff = lerp(5f, 118f, x);
@@ -469,19 +478,44 @@ public class GlSceneView extends GLSurfaceView {
             Matrix.rotateM(batBase, 0, roll, 0f, 0f, 1f);  // across the blade (roll)
 
             if (!ghost) {
-                // handle: dark cane
+                // handle: dark cane grip section below the blade
                 Matrix.setIdentityM(tmpM, 0);
-                Matrix.translateM(tmpM, 0, 0f, 0.15f, 0f);
+                Matrix.translateM(tmpM, 0, 0f, 0.14f, 0f);
                 Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
-                Matrix.scaleM(partM, 0, 0.05f, 0.30f, 0.05f);
-                drawMeshTex(cube, partM, 0.24f, 0.15f, 0.09f, whiteTex, 1f);
+                Matrix.scaleM(partM, 0, 0.034f, 0.20f, 0.034f);
+                drawMeshTex(cyl, partM, 0.22f, 0.13f, 0.08f, whiteTex, 1f);
+                // rubber grip wrap at the bottom of the handle
+                Matrix.setIdentityM(tmpM, 0);
+                Matrix.translateM(tmpM, 0, 0f, 0.055f, 0f);
+                Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
+                Matrix.scaleM(partM, 0, 0.038f, 0.09f, 0.038f);
+                drawMeshTex(cyl, partM, 0.34f, 0.32f, 0.36f, whiteTex, 1f);
             }
-            // blade: willow, front-lit
+            // ---- blade: a proper cricket-bat shape (face + spine + shoulders + toe) ----
+            // main willow face
             Matrix.setIdentityM(tmpM, 0);
-            Matrix.translateM(tmpM, 0, 0f, 0.625f, 0f);
+            Matrix.translateM(tmpM, 0, 0f, 0.66f, 0f);
             Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
-            Matrix.scaleM(partM, 0, 0.105f, 0.65f, 0.038f);
-            drawMeshTexAlpha(cube, partM, 0.95f, 0.87f, 0.70f, whiteTex, 1f, alpha);
+            Matrix.scaleM(partM, 0, 0.105f, 0.65f, 0.032f);
+            drawMeshTexAlpha(cube, partM, 0.96f, 0.88f, 0.72f, whiteTex, 1f, alpha);
+            // spine: darker wedge along the back of the blade
+            Matrix.setIdentityM(tmpM, 0);
+            Matrix.translateM(tmpM, 0, 0f, 0.60f, -0.020f);
+            Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
+            Matrix.scaleM(partM, 0, 0.058f, 0.52f, 0.022f);
+            drawMeshTexAlpha(cube, partM, 0.78f, 0.70f, 0.55f, whiteTex, 1f, alpha);
+            // shoulders: taper where the blade meets the handle
+            Matrix.setIdentityM(tmpM, 0);
+            Matrix.translateM(tmpM, 0, 0f, 0.345f, 0f);
+            Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
+            Matrix.scaleM(partM, 0, 0.062f, 0.10f, 0.030f);
+            drawMeshTexAlpha(cube, partM, 0.93f, 0.85f, 0.69f, whiteTex, 1f, alpha);
+            // rounded toe: slightly narrower cap at the bottom of the blade
+            Matrix.setIdentityM(tmpM, 0);
+            Matrix.translateM(tmpM, 0, 0f, 0.985f, 0f);
+            Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
+            Matrix.scaleM(partM, 0, 0.086f, 0.08f, 0.030f);
+            drawMeshTexAlpha(cube, partM, 0.90f, 0.82f, 0.66f, whiteTex, 1f, alpha);
         }
 
         // =====================================================================
