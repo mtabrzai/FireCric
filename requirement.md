@@ -148,3 +148,45 @@ people not visible, game confined to part of the screen):
    full-size but transparent.
 
 Version: TV v2.6 (versionCode 11); remote unchanged (v1.2, versionCode 3).
+
+## 7. v3.0 — Figma design fidelity & effortless phone control
+
+This version brings the production implementation into complete alignment with the
+Boundary Figma designs (`zQwYQprRnZaRDvDk77lWF3`):
+
+1. **Exhibition-Quality Photo-Composite 2.5D Scene**:
+   - Replaced procedural OpenGL blocks with high-resolution Figma stadium artwork and players.
+   - Dynamic bat tracking with smooth angle interpolation and biomechanical swing keyframes.
+   - Realistic ball visuals: release silhouette, pitch-marker ellipse ring with ground shadow, contact burst, and curved flight trail.
+
+2. **Figma UI & Typography**:
+   - Palette: deep green-black `#060F0E`, dark green panels `#132D25`, lime `#D7FF67`, willow `#F6F8EE`, muted `#AEBFB7`, coral `#FF895E`.
+   - All 14 Figma screens implemented: Lobby with 6-digit code, In-Play delivery, SIX / Shot Breakdown with 120° forward field arc, Dot Ball, Caught / Wicket with early/late timing meter, Innings Complete summary, Game Paused overlay, and Phone Companion screens.
+
+3. **Effortless Phone Pairing & Control**:
+   - Automatic UDP discovery: Phone locates Fire TV on the Wi-Fi network instantly.
+   - 6-digit code confirmation: Displayed in large type on TV, confirmed on phone.
+   - Drift-free absolute roll tracking: Eliminates gyro drift; ±60° hitting zone mapped 1:1.
+   - Low-latency persistent TCP connection: Instant response, state pushes, and haptic feedback.
+   - Auto-reconnect: Reconnects seamlessly if connection drops or when reopening the companion app.
+
+4. **Fire TV Remote Usability**:
+   - Full D-Pad navigation support (OK, Play/Pause, Back) for TV-only control.
+
+Version: TV v3.0 (versionCode 12); Remote v2.0 (versionCode 4).
+
+## 8. v3.1 — 100% Live 3D Pitching, Bounce vs Non-Bounce & 2-Axis Bat Control
+
+1. **Zero Static Screenshot Crops — 100% Live 3D Scene**:
+   - Removed baked screenshot backgrounds/sprites (`bg_stadium.png`, `batsman_close.png`, `bowler_delivery.png`).
+   - Restored and upgraded `GlSceneView` (OpenGL ES 2.0 on Fire TV) alongside a matching Three.js 3D stadium engine on Web, rendering a live floodlit stadium bowl, mowed turf, clay pitch, 3D wooden stumps & bails (with physical knockback on `BOWLED`), umpire, fielders, animated bowler run-up & windmilling release, and articulated batsman + 3D willow bat.
+2. **Real 3D Ball Pitching — Bouncing vs Non-Bouncing (`FULL TOSS`)**:
+   - `FULL TOSS` (`willBounce() == false`) travels through the air on the full without touching the pitch, indicated by an aerial target reticle.
+   - `YORKER` pitches at the toes and skids low (`< 0.28 m`), `GOOD LENGTH` bounces mid-pitch to stump/waist height (`0.55–0.88 m`), and `SHORT` pitches early and rises chest-high (`> 1.05 m`).
+   - `SPIN` grips and turns sharply after pitching; `SWING` curves laterally in the air before pitching.
+3. **2-Axis Phone Bat Positioning + Strike & Outfield Flight**:
+   - Roll (`±60°`) aims bat line & direction; Pitch (`±30°`) adjusts bat height & footwork (`LOW` front-foot yorker dig ↔ `MID` drive ↔ `HIGH` back-foot pull/cut).
+   - `TILT\t<lineDeg>\t<heightNorm>` protocol v3.1, accelerometer gravity fallback for non-gyro phones, `HittingZoneView` 2-axis visualizer, toggleable `Smart Assist` vs `Pro Timing`, `BOWLED` stump collisions, `CAUGHT` skyers, and mandatory 3D `FLYING` camera tracking on hits.
+   - Covered by **61/61** automated regression checks in `tools/TestBoundary.java`.
+
+Version: TV v3.1 (versionCode 13); Remote v2.1 (versionCode 5).

@@ -1,107 +1,118 @@
 # FireCric — Boundary (Fire TV cricket + phone-bat companion)
 
-A two-app cricket game built to the "Boundary" Figma designs. **v2.6 renders the
-in-play scene in real 3D (OpenGL ES 2.0)** with the design's stadium render
-**full-bleed behind the play**, a **biomechanical bat swing that never rotates
-360°**, and an innings of **five overs with a distinct bowling phase per
-over** — matching the design visual (`design/boundary-face-the-delivery.svg`).
-Full requirements: [`requirement.md`](requirement.md).
+A two-app cricket game built to the "Boundary" Figma designs. **v3.1 renders a
+100% live 3D stadium (OpenGL ES 2.0)** — floodlit bowl, mowed turf, clay pitch,
+3D stumps with knockback, umpire, articulated bowler and batsman — with a
+Figma-faithful HUD, **metric ball physics (bouncing vs full toss)**, and
+**2-axis phone control (line ±60° + bat height)**. No screenshot crops, no baked
+backgrounds: every frame is rendered. Full requirements:
+[`requirement.md`](requirement.md).
 
-- **Full-bleed design backdrop** — the stadium render fills the screen
-  edge-to-edge; a translucent pitch strip and the players sit centred on it,
-  so the whole screen is the game (the opaque grass plane is gone).
-- **Biomechanical bat swing (no 360° spin)** — backlift angled ~30° toward the
-  slips (lateral backlift technique), downswing, contact with the blade FACE
-  squared exactly to the commanded angle (elevation 0, roll 0), then a short
-  controlled wrap of ~45°. Total yaw sweep stays under a quarter turn. A subtle
-  2-frame ghost trail hints the path; the stance holds the backlift with the
-  blade already pointing at ~85% of the commanded tilt, so aiming reads true.
-- **Proper bat shape** — cane handle with rubber grip, willow blade with spine
-  wedge, shoulders and rounded toe (3D scene and 2D fallback alike).
-- **3D ball pitching** — released from the bowler's hand at ~2 m, parabolic
-  descent, sharp velocity-flip bounce at the pitch marker with length-dependent
-  rise (yorker stays low, short ball climbs to the chest), dust puff + shock ring
-  on the bounce, seam spin, trajectory-following trail, shadow that meets the
-  ball exactly at the bounce. Full tosses never pitch.
-- **Five overs, five bowling phases** — Over 1 PACE (straight, ~1.5 s), Over 2
-  SPIN (slower, grips and turns off the pitch), Over 3 SWING (curls in the
-  air before pitching), Over 4 BOUNCE (short-pitch barrage), Over 5 DEATH
-  (fast yorkers, ~1.3 s). The HUD labels the current over at all times.
-- **People on the field** — a clearly readable batsman (blue kit, helmet, white
-  pads, gloves) at the crease and a bowler in red who runs in close before
-  releasing, framed tight over-the-shoulder so they fill the screen.
-- **Broadcast camera** — subtle push-in on the delivery, pan/pull-back
-  following the struck ball into the deep field.
+- **Live 3D scene, no static crops** — procedural night stadium
+  (`tools/gen_stadium.py` → `res/drawable-nodpi/bg_stadium.png`; never a
+  Figma screenshot), grass outfield with mow stripes, clay pitch strip with
+  creases, 3D wooden stumps + bails that cartwheel on `BOWLED`, a standing
+  umpire, a bowler who runs in from the top of his mark with a windmilling arm,
+  and an articulated batsman with helmet, pads and gloves holding a 3D willow
+  bat (cane handle, grip, spine wedge, rounded toe).
+- **Real pitching: bouncing vs non-bouncing** — `FULL TOSS` flies through
+  the air on the full (aerial reticle, no pitch ring); `YORKER` pitches at the
+  toes and skids (< 0.30 m); `GOOD LENGTH` bounces mid-pitch to stump/waist
+  (0.55–0.88 m); `SHORT` pitches early and rises chest-high (> 1.05 m).
+  `SPIN` grips and kicks laterally off the pitch, `SWING` curls in the air
+  before pitching (verified path-shape tests).
+- **2-axis bat control** — phone roll (±60°) moves the bat line across the
+  crease (±0.65 m); phone pitch (±35°) sets bat height and footwork
+  (0.16–1.32 m, low front-foot dig ↔ drive ↔ back-foot pull). A live lime
+  sweet-spot reticle at the crease shows your (line, height) against the
+  incoming ball.
+- **Strike physics & four real outcomes** — deliberate swing (button, flick,
+  or TV OK) with a 220 ms biomechanical downswing that squares the blade face
+  at contact; **Smart Assist** (toggleable, default on) auto-strokes 1–4 runs
+  when you line up line ≤ 0.36 m and height ≤ 0.40 m; manual timed swings
+  unlock full power and sixes. Miss high over a yorker and it can be
+  **BOWLED** through the gate; mis-timed edges loop up and are **CAUGHT**;
+  a clean hit flies in `FLYING` with a camera that pans after it; anything
+  else is a **DOT** to the keeper.
+- **Five overs, five bowling phases** — 5 overs / 30 balls or 3 wickets:
+  PACE → SPIN → SWING → BOUNCE → DEATH, each over labelled in the HUD with its
+  own delivery mix (BOUNCE is short-heavy, DEATH is yorker/full-toss heavy).
+- **Figma-faithful UI** — Inter typeface from `assets/fonts`, the design
+  palette (#060F0E / #132D25 / lime #D7FF67 / coral #FF895E / ball #F15D4D),
+  lobby with 6-digit pairing code, in-play top/bottom bars, SWING NOW prompt,
+  delivery tags, shot breakdown with 120° forward-field arc, YOUR SWING timing
+  meter, innings-complete log, game-paused overlay. D-pad navigable without
+  the phone.
+- **Effortless pairing** — the phone auto-discovers the TV (UDP), you confirm
+  the 6-digit code, calibrate once (hold still 3 s), and later launches
+  reconnect automatically. One persistent TCP connection (no per-message
+  sockets), 1 Hz heartbeat, 3 s watchdog pauses the TV ("delivery not
+  counted") if the bat drops. Haptics: release tick, boundary double-pulse,
+  wicket buzz.
 
-- **`boundary/`** — the Fire TV app (Fire OS 6+, minSdk 22, targetSdk 28, leanback).
-  - `GlSceneView` — the OpenGL ES 2.0 scene above: design stadium backdrop
-    (`res/drawable/bg_3d.png`, extracted from the design visual, 1024×512 POT),
-    procedural grass/pitch textures, lit 3D batsman with swinging 3D bat,
-    3D bowler run-up with bowling-arm windmill, sphere ball, blob shadows.
-  - `HudView` — 2D overlay with the designed screens: lobby with pairing code,
-    top HUD (`YOU 12/0`, `OVERS 0.3/2`, `PHONE CONNECTED`), `SWING NOW` tag,
-    contact ring, shot-result breakdown (v2.6: translucent fill so the 3D scene
-    stays visible behind it), dot-ball / wicket panels,
-    innings-complete stats, and the "GAME PAUSED — your bat disconnected"
-    watchdog. The 2D fallback field mirrors the same keyframed swing and
-    piecewise-bounce trajectory when GL is unavailable.
-  - `BoundaryModel` — pure-Java game logic (unit-tested, unit-tested; v2.5 adds the 5-over phase engine).
-- **`boundary-remote/`** — the Android phone companion (minSdk 21, targetSdk 34).
-  Auto-discovers the TV on launch, then connect → calibrate (hold still 3 s) →
-  "Your bat is ready". Tilt the phone left/right to angle the bat (±60°, 120°
-  forward zone); the shot fires automatically when the bat meets the ball.
-  SWING button / flick = deliberate shot. Quiet PING keepalive every 3 s.
+## Protocol v3 (same Wi-Fi) — TV and phone versions must match
 
-## Protocol (same Wi-Fi)
+Discovery: phone broadcasts `BOUNDARY_DISCOVER 3` to UDP 8772; the TV replies
+`BOUNDARY 3 <ip> <port> <tvName>` (the code is never broadcast). Session (one
+persistent TCP connection to 8771, `\n`-terminated, tab-separated):
 
-TV listens on **TCP 8771** + **UDP 8772** (`FIRECALC_DISCOVER` probe). Phone → TV:
-`MOVE dx dy` (bat angle), `SWING`/`=`/`CLICK`, `S`, `C`, `PING`. TV → phone:
-`PONG` or `YOU: r/w` + overs.
-
-Quick Play = **5 overs / 30 balls** or 3 wickets, one bowling phase per over
-(PACE → SPIN → SWING → BOUNCE → DEATH). Runs banded 1/2/3/4/6 by hit distance.
-Bat angle within **±30°** of the ball line = contact (PERFECT/GOOD by error;
-modest tilt angles hit easily); too early on a short ball = caught.
+- Phone → TV: `HELLO 3 <code> <phoneName>` (first line), then
+  `TILT <lineDeg> <heightNorm>` (absolute 2-axis pose, ~30 Hz),
+  `SWING` `START` `NEXT` `PAUSE` `RESUME` `AGAIN` `LOBBY`
+  `ASSIST <0|1>`, `PING` (1 Hz).
+- TV → phone: `WELCOME <tvName>` or `ERR CODE` / `ERR VERSION`;
+  `STATE k=v …` pushed on every change (screen, score, overs, over label,
+  delivery, bounces, assist, hint); `EVENT HIT <runs> <timing>` /
+  `EVENT WICKET` / `EVENT DOT` / `EVENT BOWL`; `PONG`.
 
 ## Build (no Android Studio needed)
 
 `tools/build-apk.sh <project-dir> <out.apk> <minSdk> <targetSdk> <versionCode> <versionName>`
-(JDK 17 + build-tools 34: aapt2/d8/apksigner, debug-signed):
+(JDK 17 + build-tools 34: aapt2/d8/zipalign/apksigner, debug-signed;
+`ANDROID_SDK` and `JAVA_HOME` env vars override the default tool paths):
 
 ```bash
-bash tools/build-apk.sh boundary boundary-tv.apk 22 28 11 2.6
-bash tools/build-apk.sh boundary-remote boundary-remote.apk 21 34 3 1.2
+bash tools/get_fonts.sh                                  # Inter (SIL OFL) into both apps
+bash tools/build-apk.sh boundary boundary-tv.apk 22 28 13 3.1
+bash tools/build-apk.sh boundary-remote boundary-remote.apk 21 34 5 2.1
 ```
 
-Binary assets are generated (Pillow) and not committed: run each project's
-`tools/gen_assets.py` from its root for icons/banner, and the TV app's
-`tools/gen_bg3d.py` to extract the stadium backdrop
-(`res/drawable/bg_3d.png`, 1024×512 POT) from the design visual
-`design/boundary-face-the-delivery.svg`. With those three scripts run, a clean
-clone builds both APKs exactly as released.
+Binary assets are generated/downloaded, never committed: run
+`tools/get_fonts.sh` once (fonts), then each project's `tools/gen_assets.py`
+for icons/banner, and the TV app's `tools/gen_stadium.py` for the procedural
+stadium backdrop (`res/drawable-nodpi/bg_stadium.png`). With those run, a
+clean clone builds both APKs exactly as released.
 
 ## Tests
 
-`tools/TestBoundary.java` — compile `BoundaryModel`, `RemoteServer`,
-`RemoteClient`, `MotionMapper` + `TestBoundary` (any JDK 17) and run: run bands,
-5-over format, over-phase order and per-over travel time, wobble bounds, ±60°
-clamp, no-shake angle EMA, fixed batsman, easy-contact band, innings completion
-(30 balls or 3 wickets), wire protocol incl. UDP discovery, MotionMapper
-deadzone/flush. 23/23 passing.
+`tools/TestBoundary.java` — **61/61 passing**. Covers: 5-over format, run
+bands, phase order and per-over delivery mixes, wobble bounds, angle clamps
+and the no-shake EMA glide, full-toss-never-bounces, yorker/good-length/short
+pitch zones and rise ordering, spin kick + swing curve path shapes, 2-axis
+pose mapping, Smart Assist (alignment, 57 m cap, manual sixes), misalignment
+beats, BOWLED into the stumps, high-bat-on-short contact, CAUGHT edge skyers,
+timing meter/labels, FLYING-before-RESULT, auto-advance, pause-not-counted,
+lobby reset, state payload keys, headlines, protocol mirror across both apps,
+discovery/pairing/STATE codecs, TiltMath deadzone + absolute no-drift mapping,
+and live loopback sessions (WELCOME / ERR CODE / ERR VERSION / PING-PONG /
+TILT / STATE push / bat takeover / UDP discovery without code leak / 3 s
+watchdog / phone SessionClient pairing).
 
 ```bash
-javac --release 8 -d /tmp/t boundary/src/com/example/boundary/{BoundaryModel,RemoteServer}.java \
-  boundary-remote/src/com/example/boundaryremote/{RemoteClient,MotionMapper}.java tools/TestBoundary.java
+javac --release 8 -cp <android.jar> -d /tmp/t \
+  boundary/src/com/example/boundary/{BoundaryModel,Protocol,PairingCode,SessionServer}.java \
+  boundary-remote/src/com/example/boundaryremote/{Protocol,TiltMath,SessionClient,Discovery}.java \
+  tools/TestBoundary.java
 java -cp /tmp/t TestBoundary
 ```
 
 ## APK downloads
 
-Two signed (debug-key) APKs ship with v2.6, delivered as download cards with
+Two signed (debug-key) APKs ship with v3.1, delivered as download cards with
 the release notes:
 
-- **Fire TV app** — `boundary-tv-v2.6-face-the-delivery.apk` (versionCode 11 / versionName 2.6)
-- **Phone remote** — `boundary-remote-v1.2.apk` (versionCode 3 / versionName 1.2)
+- **Fire TV app** — `boundary-tv-v3.1.apk` (versionCode 13 / versionName 3.1)
+- **Phone remote** — `boundary-remote-v2.1.apk` (versionCode 5 / versionName 2.1)
 
 Build locally with the commands above to reproduce them exactly.
 

@@ -3,3 +3,6 @@ __pycache__/
 *.apk
 *.idsig
 *.jks
+assets/fonts/*.ttf
+assets/fonts/OFL.txt
+res/drawable-nodpi/bg_stadium.png

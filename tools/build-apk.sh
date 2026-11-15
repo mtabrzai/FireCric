@@ -9,10 +9,10 @@ TGTSDK=$4
 VCODE=${5:-1}
 VNAME=${6:-1.0}
 
-SDK=/workspace/tools/sdk
+SDK=${ANDROID_SDK:-/workspace/tools/sdk}
 BT=$SDK/build-tools/34.0.0
 PLAT=$SDK/platforms/android-$MINSDK/android.jar
-JDK=/workspace/tools/jdk17
+JDK=${JAVA_HOME:-/workspace/tools/jdk17}
 export PATH=$JDK/bin:$PATH
 export JAVA_HOME=$JDK
 
@@ -30,6 +30,7 @@ $BT/aapt2 link -o build/unsigned.apk \
     --java build/gen \
     --min-sdk-version $MINSDK --target-sdk-version $TGTSDK \
     --version-code $VCODE --version-name $VNAME \
+    $( [ -d assets ] && echo -A assets ) \
     build/flat/*
 
 echo "== javac =="
