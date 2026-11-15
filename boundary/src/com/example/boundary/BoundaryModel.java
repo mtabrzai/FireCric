@@ -1,40 +1,71 @@
 package com.example.boundary;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 
+/**
+ * Boundary game model v3.1 — a pure-Java, metric 3D cricket simulation.
+ *
+ * World coordinates (metres): origin on the turf at the batting popping
+ * crease. x lateral (-1.2 off-side .. +1.2 leg-side), y altitude (0 turf,
+ * 0.71 bails, 1.35 chest, 2.05 bowler release), z along the pitch
+ * (-18.9 bowler release crease, 0 strike plane, +0.6 batting stumps,
+ * +2.5 keeper, 68.0 boundary rope).
+ *
+ * Gameplay: 5 overs / 30 balls / 3 wickets, one bowling phase per over
+ * (PACE, SPIN, SWING, BOUNCE, DEATH). Real bouncing deliveries (YORKER /
+ * GOOD LENGTH / SHORT) vs the non-bouncing FULL TOSS. 2-axis bat pose:
+ * roll ±60° aims the line, pitch ±1.0 sets the bat height & footwork.
+ * Smart Assist (default on) plays an automatic timed stroke when the bat is
+ * lined up; a deliberate SWING unlocks full power. Missing a straight ball
+ * can knock the stumps (BOWLED); clipping the top or outside edge on bad
+ * timing loops a catch (CAUGHT). Hits always fly through the FLYING phase
+ * before the result.
+ */
 public class BoundaryModel {
 
-    public enum Phase {LOBBY, RUNUP, BOWLING, FLYING, RESULT, GAME_OVER}
+    public enum Phase {LOBBY, READY, RUNUP, BOWLING, FLYING, BOWLED, RESULT, GAME_OVER, PAUSED}
 
-    // v2.5: five overs, and every over is a distinct bowling phase
+    // ---- format ----
     public static final int MAX_BALLS = 30;      // 5 overs x 6 balls
     public static final int MAX_OVERS = 5;
     public static final int MAX_WICKETS = 3;
-    private static final float BAT_LINE_RATIO = 0.84f;
-    private static final float PITCH_TOP = 0.42f;
-    private static final float PITCH_BOT = 0.74f;
-    private static final float ANGLE_LIMIT = 60f;   // 120° forward hitting zone
-    private static final float ANGLE_TOL = 30f;     // v2.5: widened 18 -> 30, ball meets the bat easily
-    private static final float WOBBLE = 0.03f;      // small line wobble (fraction of width)
 
-    // ---- per-over bowling phases (index = over number - 1) ----
-    // PACE: straight and true. SPIN: slower, grips and turns off the pitch.
-    // SWING: curls in the air before pitching. BOUNCE: short-pitch barrage.
-    // DEATH: fast yorkers and surprises at the end.
+    // ---- world constants (metres) ----
+    public static final float RELEASE_Z = -18.9f;
+    public static final float RELEASE_Y = 2.05f;
+    public static final float STUMP_Z = 0.60f;
+    public static final float KEEPER_Z = 2.5f;
+    public static final float BOUNDARY_M = 68f;
+    public static final float BALL_R = 0.036f;
+
+    // ---- bat pose ----
+    public static final float LINE_LIMIT = 60f;          // ±60° forward zone
+    public static final float BAT_X_SPAN = 0.65f;       // lateral reach at ±60°
+    public static final float BAT_Y_MID = 0.74f;        // sweet-spot height, neutral stance
+    public static final float BAT_Y_SPAN = 0.58f;       // half-range of the height axis
+
+    // ---- contact tolerances (metres) ----
+    public static final float CONTACT_LINE = 0.36f;
+    public static final float CONTACT_HEIGHT = 0.40f;
+    public static final float EDGE_HEIGHT = 0.56f;
+
+    // ---- over phases ----
     public static final String[] OVER_NAMES = {"PACE", "SPIN", "SWING", "BOUNCE", "DEATH"};
     public static final String[] OVER_HINTS = {
-            "Over 1 of 5 — PACE. Straight and true off the square.",
-            "Over 2 of 5 — SPIN. Slower through the air, grips and turns off the pitch.",
-            "Over 3 of 5 — SWING. It curls late in the air before it pitches.",
-            "Over 4 of 5 — BOUNCE. Short-pitch barrage, sit under it.",
-            "Over 5 of 5 — DEATH. Fast, full and frantic. Finish strong.",
+            "Straight and true off the square.",
+            "Slower, grips and turns off the pitch.",
+            "It curls late in the air before it pitches.",
+            "Short-pitch barrage, sit under it.",
+            "Fast, full and frantic. Finish strong.",
     };
-    private static final float[] OVER_TRAVEL = {1500f, 1850f, 1650f, 1550f, 1300f}; // release -> bat (ms)
-    private static final float[] OVER_WOBBLE = {0.020f, 0.035f, 0.020f, 0.020f, 0.015f};
-    private static final float[] OVER_TURN = {0f, 150f, 0f, 0f, 0f};    // px/s lateral kick at the bounce (spin)
-    private static final float[] OVER_CURVE = {0f, 0f, 90f, 0f, 0f};    // px/s^2 in-air drift before the pitch (swing)
+    private static final long[] OVER_TRAVEL = {1450, 1850, 1600, 1500, 1280}; // ms release -> crease
+    private static final float[] OVER_WOBBLE = {0.10f, 0.16f, 0.12f, 0.11f, 0.08f}; // max |xLine| (m)
+    private static final float[] OVER_TURN = {0f, 0.34f, 0f, 0f, 0.10f};   // lateral kick at the bounce (m)
+    private static final float[] OVER_DRIFT = {0f, 0f, 0.28f, 0f, 0f};    // in-air drift before pitching (m)
     // cumulative delivery weights per over: YORKER, GOOD LENGTH, SHORT, FULL TOSS
     private static final float[][] OVER_W = {
             {0.15f, 0.70f, 0.90f, 1.01f},
@@ -44,68 +75,81 @@ public class BoundaryModel {
             {0.45f, 0.70f, 0.80f, 1.01f},
     };
 
-    private final float width;
-    private final float height;
     private final Random random;
 
+    // ---- state ----
     private Phase phase = Phase.LOBBY;
-    private long phaseTimer;
+    private Phase pausedFrom = Phase.LOBBY;
+    private long phaseTimer;      // ms in the current phase
+    private long travelMs;        // current over's release -> crease time
     private long now;
 
-    public float ballX;
-    public float ballY;
-    public float ballVX;
-    public float ballVY;
-    public float pitchX;
-    public float pitchY;
-    public boolean ballLive;
-    public boolean bounced;
+    // ---- the live delivery ----
     public String delivery = "";
     public String deliveryHint = "";
+    private boolean bounces = true;
+    private float pitchZ;         // where it lands (m)
+    private float pitchP;         // progress fraction where it lands
+    private float x0;             // release line (m)
+    private float xPitch;
+    private float xCrease;        // line at the strike plane (m)
+    private float turnM;          // spin kick applied after the bounce (m)
+    private float driftM;         // swing drift in the air before the bounce (m)
+    private float arriveY;        // height at the strike plane (m)
+    public boolean ballLive;
+    public boolean bounced;
+    private boolean swingArmed;  // a manual swing was played this ball
+    private boolean swingConsumed;
+    private boolean resolved;
+    private boolean assistStroke; // this ball was played by Smart Assist
 
-    public float hitX;
-    public float hitY;
-    public float hitVX;
-    public float hitVY;
-    public float hitDist;
-    public float hitFlown;
-
-    public float batX;              // fixed at crease center
-    public float batAngle;          // deg, 0 = straight at the bowler, ±60 within the 120° zone
-    public float batAngleTarget;
-    public float swing;
+    // ---- 2-axis bat pose (EMA-glide targets -> smoothed values) ----
+    private float batLineDeg;
+    private float batHeightNorm;
+    private float batLineTarget;
+    private float batHeightTarget;
+    public float swing;           // 0 = none; 1 -> 0 decays; scene reads the swing pose
     public float swingDir = 1f;
+    private boolean smartAssist = true;
 
-    public int runs;
-    public int wickets;
-    public int balls;
+    // ---- innings ----
+    public int runs, wickets, balls;
     public boolean gameOver;
     public final List<String> ballLog = new ArrayList<String>();
 
+    // ---- last outcome ----
     public int lastRuns;
     public boolean lastWicket;
+    public boolean lastBowled;
     public String timingLabel = "";
     public String resultTitle = "";
+    public String resultKicker = "";
     public String resultSub = "";
     public int distM;
     public int dirDeg;
-    public String popup = "";
-    private long popupUntil;
+    public float timingMeter = 0.5f; // 0=EARLY 0.5=PERFECT 1=LATE
+    public boolean wasAssisted;
+
+    // ---- struck-ball flight ----
+    public float flyT;            // 0..1 through FLYING
+    private float flyDur = 1.8f;  // seconds
+    private float flyFromX, flyFromY;
+    public float flyX, flyY, flyZ;
+    private float flyApex;
+    private float stumpAnim = -1f; // 0..1 through the BOWLED animation
 
     public BoundaryModel(float w, float h) {
         this(w, h, new Random());
     }
 
     public BoundaryModel(float w, float h, Random r) {
-        this.width = w;
-        this.height = h;
         this.random = r;
         reset();
     }
 
-    public float batLineY() {
-        return height * BAT_LINE_RATIO;
-    }
+    // =====================================================================
+    // Innings lifecycle
+    // =====================================================================
 
     public synchronized void reset() {
         runs = 0;
@@ -115,44 +159,86 @@ public class BoundaryModel {
         ballLog.clear();
         lastRuns = 0;
         lastWicket = false;
+        lastBowled = false;
         timingLabel = "";
         resultTitle = "";
+        resultKicker = "";
         resultSub = "";
-        popup = "";
-        batX = width / 2f;
-        batAngle = 0f;
-        batAngleTarget = 0f;
+        batLineDeg = 0;
+        batHeightNorm = 0;
+        batLineTarget = 0;
+        batHeightTarget = 0;
+        swing = 0;
+        ballLive = false;
         phase = Phase.LOBBY;
+        pausedFrom = Phase.LOBBY;
         phaseTimer = 0;
     }
 
-    public synchronized void startInnings() {
+    /** Phone paired -> wait on the READY screen for Start innings. */
+    public synchronized void ready() {
         if (phase == Phase.LOBBY || phase == Phase.GAME_OVER) {
-            reset();
-            newBall();
+            if (phase == Phase.GAME_OVER) {
+                reset();
+            }
+            phase = Phase.READY;
+            phaseTimer = 0;
         }
     }
 
-    /** 0-based index of the over currently being bowled (clamped to the last over). */
-    public synchronized int getOverIndex() {
-        return Math.min(balls / 6, MAX_OVERS - 1);
+    public synchronized void startInnings() {
+        if (phase == Phase.LOBBY || phase == Phase.GAME_OVER || phase == Phase.READY) {
+            if (phase == Phase.GAME_OVER) {
+                reset();
+            }
+            phase = Phase.READY;
+            nextBall();
+        }
     }
 
-    /** Name of the current over's bowling phase: PACE, SPIN, SWING, BOUNCE or DEATH. */
-    public synchronized String getOverType() {
-        return OVER_NAMES[getOverIndex()];
+    /** Moves to the next delivery (phone Next / TV OK / auto-advance). */
+    public synchronized void nextBall() {
+        if (phase == Phase.READY || phase == Phase.RESULT) {
+            if (gameOver) {
+                phase = Phase.GAME_OVER;
+            } else {
+                newBall();
+            }
+        }
     }
 
-    /** HUD label for the current over, e.g. "OVER 2/5 · SPIN". */
-    public synchronized String getOverLabel() {
-        int o = getOverIndex();
-        return "OVER " + (o + 1) + "/" + MAX_OVERS + " · " + OVER_NAMES[o];
+    public synchronized void backToLobby() {
+        reset();
     }
 
-    /** One-line description of the current over's bowling phase (lobby/over-change banner). */
-    public synchronized String getOverHint() {
-        return OVER_HINTS[getOverIndex()];
+    // =====================================================================
+    // Pause / resume (delivery in flight is NOT counted)
+    // =====================================================================
+
+    public synchronized void pause() {
+        if (phase == Phase.PAUSED) {
+            return;
+        }
+        if (phase == Phase.RUNUP || phase == Phase.BOWLING || phase == Phase.FLYING
+                || phase == Phase.BOWLED || phase == Phase.RESULT || phase == Phase.READY) {
+            pausedFrom = phase;
+            phase = Phase.PAUSED;
+            phaseTimer = 0;
+            ballLive = false; // the live delivery is abandoned, not counted
+        }
     }
+
+    public synchronized void resume() {
+        if (phase != Phase.PAUSED) {
+            return;
+        }
+        phase = Phase.READY; // never resume mid-delivery
+        phaseTimer = 0;
+    }
+
+    // =====================================================================
+    // Delivery generation
+    // =====================================================================
 
     public synchronized void newBall() {
         int over = getOverIndex();
@@ -160,243 +246,165 @@ public class BoundaryModel {
         float[] w = OVER_W[over];
         String type;
         String hint;
-        float lenFrac;
+        float pitchZMin, pitchZMax, yMin, yMax;
         if (r < w[0]) {
             type = "YORKER";
-            hint = "Watch the toes";
-            lenFrac = 0.97f;
+            hint = "Dig low — right at your toes";
+            pitchZMin = -1.6f;  pitchZMax = -0.4f;  yMin = 0.08f; yMax = 0.26f;
         } else if (r < w[1]) {
             type = "GOOD LENGTH";
             hint = "Watch for the rise";
-            lenFrac = 0.8f;
+            pitchZMin = -6.5f;  pitchZMax = -4.0f;  yMin = 0.55f; yMax = 0.88f;
         } else if (r < w[2]) {
             type = "SHORT";
-            hint = "Back and across";
-            lenFrac = 0.62f;
+            hint = "Rising high — go back and across";
+            pitchZMin = -10.5f; pitchZMax = -7.2f;  yMin = 1.05f; yMax = 1.45f;
         } else {
             type = "FULL TOSS";
-            hint = "Drive it early";
-            lenFrac = 0.47f;
+            hint = "No bounce — drive it early";
+            pitchZMin = 0;     pitchZMax = 0;      yMin = 0.42f; yMax = 0.92f;
         }
         delivery = type;
         deliveryHint = hint;
-        pitchX = width / 2f + (random.nextFloat() - 0.5f) * width * OVER_WOBBLE[over] * 2f;
-        pitchY = height * (PITCH_TOP + (lenFrac - 0.47f) * 0.62f);
-        float dist = batLineY() - 90;
-        float speed = dist / (OVER_TRAVEL[over] / 1000f);   // per-over release -> bat travel time
-        float dx = pitchX - width / 2f;
-        float dy = pitchY - 90;
-        float d = (float) Math.sqrt(dx * dx + dy * dy);
-        ballVX = dx / d * speed;
-        ballVY = dy / d * speed;
-        turnVX = OVER_TURN[over] > 0f
-                ? (random.nextBoolean() ? 1f : -1f) * OVER_TURN[over] * (0.8f + 0.4f * random.nextFloat())
+        bounces = !"FULL TOSS".equals(type);
+        travelMs = OVER_TRAVEL[over];
+        pitchZ = bounces ? lerp(pitchZMin, pitchZMax, random.nextFloat()) : 0f;
+        arriveY = lerp(yMin, yMax, random.nextFloat());
+        pitchP = clamp01(pitchZ / RELEASE_Z); // progress where it lands
+        float wob = OVER_WOBBLE[over];
+        xCrease = (random.nextFloat() * 2f - 1f) * wob;
+        x0 = (random.nextBoolean() ? 1f : -1f) * (0.34f + random.nextFloat() * 0.12f);
+        driftM = OVER_DRIFT[over] > 0f
+                ? (random.nextBoolean() ? 1f : -1f) * OVER_DRIFT[over] * (0.7f + 0.6f * random.nextFloat())
                 : 0f;
-        curveAccel = OVER_CURVE[over] > 0f
-                ? (random.nextBoolean() ? 1f : -1f) * OVER_CURVE[over] * (0.7f + 0.6f * random.nextFloat())
+        turnM = OVER_TURN[over] > 0f
+                ? (random.nextBoolean() ? 1f : -1f) * OVER_TURN[over] * (0.7f + 0.6f * random.nextFloat())
                 : 0f;
-        ballX = width / 2f;
-        ballY = 90;
+        if (!bounces && "SPIN".equals(OVER_NAMES[over])) {
+            turnM = 0f; // full toss in a spin over dips rather than turns
+        }
+        // the pitch point is set against the turn/drift so the post-bounce leg
+        // deviates sharply: SPIN kicks off the pitch, SWING straightens late
+        xPitch = bounces ? x0 + (xCrease - driftM - turnM - x0) * pitchP : 0f;
         ballLive = true;
         bounced = false;
-        phase = Phase.RUNUP;
+        swingArmed = false;
+        swingConsumed = false;
+        resolved = false;
+        assistStroke = false;
+        wasAssisted = false;
+        phase = Phase.RUNUP; // bowler runs in
         phaseTimer = 0;
     }
 
-    private float turnVX;      // lateral kick applied at the bounce (spin overs)
-    private float curveAccel; // in-air lateral acceleration before the pitch (swing overs)
+    /** True when the current delivery pitches (false = FULL TOSS). */
+    public synchronized boolean willBounce() {
+        return bounces;
+    }
 
-    // phone motion changes ONLY the bat angle (batsman stays put)
+    // =====================================================================
+    // Ball kinematics (progress p: 0 release -> 1 strike plane)
+    // =====================================================================
+
+    /** Progress along the delivery: 0 at release, 1 at the strike plane. */
+    public synchronized float deliveryProgress() {
+        return clamp01(phaseTimer / (float) travelMs);
+    }
+
+    /** Ball lateral position (m) at progress p. */
+    public float ballWorldX(float p) {
+        if (!bounces) {
+            return lerp(x0, xCrease, smooth01(p));
+        }
+        if (p <= pitchP) {
+            float u = pitchP <= 0f ? 1f : clamp01(p / pitchP);
+            return lerp(x0, xPitch, u) + driftM * (u * u); // swing drift in the air
+        }
+        float u = clamp01((p - pitchP) / Math.max(0.02f, 1f - pitchP));
+        return xPitch + (xCrease - xPitch) * (float) Math.pow(u, 0.85f); // turn after pitching
+    }
+
+    /** Ball height (m) at progress p. */
+    public float ballWorldY(float p) {
+        if (!bounces) {
+            return BALL_R + (RELEASE_Y - BALL_R) * (float) Math.pow(1f - p, 1.2f)
+                    * (1f - 0.25f * p) + Math.max(0f, arriveY - BALL_R) * smooth01(p);
+        }
+        if (p <= pitchP) {
+            float u = pitchP <= 0f ? 1f : clamp01(p / pitchP);
+            return BALL_R + (RELEASE_Y - BALL_R) * (1f - u) * (1f - u);
+        }
+        float u = clamp01((p - pitchP) / Math.max(0.02f, 1f - pitchP));
+        return BALL_R + (arriveY - BALL_R) * (float) Math.pow(u, 0.8f);
+    }
+
+    /** Ball depth (m) at progress p (linear in time). */
+    public float ballWorldZ(float p) {
+        return RELEASE_Z * (1f - p);
+    }
+
+    /** Where the delivery will pitch (m). */
+    public synchronized float pitchWorldZ() {
+        return pitchZ;
+    }
+
+    public synchronized float pitchWorldX() {
+        return bounces ? xPitch : xCrease;
+    }
+
+    /** Full-toss aerial reticle: where the ball crosses the strike plane. */
+    public synchronized float arriveWorldX() {
+        return xCrease;
+    }
+
+    public synchronized float arriveWorldY() {
+        return arriveY;
+    }
+
+    // =====================================================================
+    // Bat pose
+    // =====================================================================
+
+    /** Absolute 2-axis target from the phone: line ±60°, height ±1.0. */
+    public synchronized void setBatPose(float lineDeg, float heightNorm) {
+        batLineTarget = clamp(lineDeg, -LINE_LIMIT, LINE_LIMIT);
+        batHeightTarget = clamp(heightNorm, -1f, 1f);
+    }
+
+    /** Legacy 1-axis absolute target (kept for D-pad nudges and tests). */
+    public synchronized void setBatTarget(float lineDeg) {
+        setBatPose(lineDeg, batHeightTarget);
+    }
+
+    /** Legacy relative nudge (tests): dx deg of line, dy of height. */
     public synchronized void moveBat(float dx, float dy) {
-        batAngleTarget = clamp(batAngleTarget + dx * 0.15f, -ANGLE_LIMIT, ANGLE_LIMIT);
+        setBatPose(batLineTarget + dx * 0.15f, batHeightTarget + dy * 0.05f);
     }
 
-    public synchronized float ballAngleDeg() {
-        return (float) Math.toDegrees(Math.atan2(ballVX, ballVY)); // 0 = straight down the pitch
+    public synchronized void setAssist(boolean on) {
+        smartAssist = on;
     }
 
-    private float angleErr() {
-        float e = batAngle - ballAngleDeg();
-        while (e > 180f) e -= 360f;
-        while (e < -180f) e += 360f;
-        return e;
+    public synchronized boolean isAssistOn() {
+        return smartAssist;
     }
 
-    // automatic contact evaluation when the ball reaches the bat
-    private void resolveContact(boolean timed) {
-        float err = angleErr();
-        float aErr = Math.abs(err);
-        swing = 1f;
-        swingDir = err >= 0 ? 1f : -1f;
-        if (aErr <= ANGLE_TOL) {
-            float quality = clamp(1f - aErr / ANGLE_TOL, 0f, 1f);
-            if (timed) quality = Math.min(1f, quality + 0.15f);
-            if (err < -8 && quality < 0.65f && delivery.equals("SHORT")) {
-                lastWicket = true;
-                lastRuns = 0;
-                wickets++;
-                balls++;
-                ballLog.add("W");
-                resultTitle = "CAUGHT.";
-                resultSub = "A little early. A little too high.";
-                timingLabel = "EARLY";
-                popup = "W";
-                popupUntil = now + 1500;
-            } else {
-                float dist = 120 + quality * (300 + random.nextFloat() * 520);
-                lastRuns = bandRuns(dist);
-                lastWicket = false;
-                runs += lastRuns;
-                balls++;
-                ballLog.add(lastRuns == 0 ? "0" : String.valueOf(lastRuns));
-                distM = Math.round(dist / 10f);
-                float ang = (float) Math.toRadians(batAngle) + (random.nextFloat() - 0.5f) * 0.5f;
-                dirDeg = 90 + Math.round((float) Math.toDegrees(ang));
-                resultTitle = lastRuns == 6 ? "SIX." : lastRuns == 4 ? "FOUR!" : lastRuns + " RUN" + (lastRuns > 1 ? "S" : "");
-                resultSub = lastRuns == 6 ? "Over the rope. Into the stands." : lastRuns == 4 ? "Raced to the fence." : "Into the gap.";
-                timingLabel = quality >= 0.75f ? "PERFECT" : quality >= 0.4f ? "GOOD" : (err < 0 ? "EARLY" : "LATE");
-                popup = "+" + lastRuns;
-                popupUntil = now + 1500;
-                hitDist = dist;
-                hitVX = (float) Math.sin(ang) * (320 + dist);
-                hitVY = -(float) Math.cos(ang) * (200 + dist * 0.5f) - 160;
-                hitX = ballX;
-                hitY = ballY;
-                hitFlown = 0;
-                phase = Phase.FLYING;
-                phaseTimer = 0;
-            }
-            if (balls >= MAX_BALLS || wickets >= MAX_WICKETS) {
-                gameOver = true;
-            }
-            if (phase != Phase.FLYING) {
-                phase = Phase.RESULT;
-                phaseTimer = 0;
-            }
-        } else {
-            lastRuns = 0;
-            lastWicket = false;
-            balls++;
-            ballLog.add("0");
-            resultTitle = "DOT BALL";
-            resultSub = "JUST MISSED. Bat angle did not meet the ball. Next ball.";
-            timingLabel = "NO CONTACT";
-            popup = "dot";
-            popupUntil = now + 1200;
-            if (balls >= MAX_BALLS || wickets >= MAX_WICKETS) {
-                gameOver = true;
-            }
-            phase = Phase.RESULT;
-            phaseTimer = 0;
-        }
+    /** Lateral sweet-spot position (m). */
+    public synchronized float batWorldX() {
+        return batLineDeg / LINE_LIMIT * BAT_X_SPAN;
     }
 
-    // SWING button / flick: play the ball NOW with the current bat angle
-    public synchronized void strike() {
-        if (phase != Phase.BOWLING || !ballLive) {
-            return;
-        }
-        // v2.5: generous deliberate-swing window — from just before the pitch
-        // marker all the way to the bat line
-        if (ballY < pitchY - 60 || ballY > batLineY()) {
-            swing = 1f;
-            return;
-        }
-        resolveContact(true);
+    /** Sweet-spot height (m): 0.16 low dig .. 1.32 high pull. */
+    public synchronized float batWorldY() {
+        return BAT_Y_MID + batHeightNorm * BAT_Y_SPAN;
     }
 
-    public static int bandRuns(float dist) {
-        if (dist < 140) {
-            return 1;
-        }
-        if (dist < 280) {
-            return 2;
-        }
-        if (dist < 430) {
-            return 3;
-        }
-        if (dist < 620) {
-            return 4;
-        }
-        return 6;
+    public synchronized float getBatAngle() {
+        return batLineDeg;
     }
 
-    public synchronized void update(long dtMs) {
-        now += dtMs;
-        batAngle += (batAngleTarget - batAngle) * 0.25f; // EMA: angle glides, never shakes
-        batX = width / 2f; // batsman constant in one place
-        if (swing > 0) {
-            swing = Math.max(0, swing - dtMs / 180f);
-        }
-        switch (phase) {
-            case LOBBY:
-            case GAME_OVER:
-                break;
-            case RUNUP:
-                phaseTimer += dtMs;
-                if (phaseTimer > 900) {
-                    phase = Phase.BOWLING;
-                    phaseTimer = 0;
-                }
-                break;
-            case BOWLING:
-                if (!bounced) {
-                    // swing overs: the ball drifts laterally in the air before pitching
-                    ballVX += curveAccel * dtMs / 1000f;
-                }
-                ballX += ballVX * dtMs / 1000f;
-                ballY += ballVY * dtMs / 1000f;
-                if (!bounced && ballY >= pitchY) {
-                    bounced = true; // pitch bounce (visual pulse in the view)
-                    if (turnVX != 0f) {
-                        // spin overs: the ball grips and turns off the pitch
-                        ballVX += turnVX;
-                        turnVX = 0f;
-                        curveAccel = 0f;
-                    }
-                }
-                if (ballY >= batLineY()) {
-                    ballLive = false;
-                    resolveContact(false); // automatic: bat angle meets the ball or dot
-                }
-                break;
-            case FLYING:
-                hitFlown += (float) Math.hypot(hitVX, hitVY) * dtMs / 1000f;
-                hitX += hitVX * dtMs / 1000f;
-                hitY += hitVY * dtMs / 1000f;
-                hitVY += 500 * dtMs / 1000f;
-                if (hitFlown >= hitDist || hitY < -60 || hitY > height + 60) {
-                    phase = Phase.RESULT;
-                    phaseTimer = 0;
-                }
-                break;
-            case RESULT:
-                phaseTimer += dtMs;
-                if (phaseTimer > 2600) {
-                    if (gameOver) {
-                        phase = Phase.GAME_OVER;
-                    } else {
-                        newBall();
-                    }
-                }
-                break;
-        }
-    }
-
-    private static float clamp(float v, float a, float b) {
-        return v < a ? a : (v > b ? b : v);
-    }
-
-    public synchronized Phase getPhase() {
-        return phase;
-    }
-
-    public synchronized boolean isBallLive() {
-        return ballLive;
-    }
-
-    public synchronized float getBatX() {
-        return batX;
+    public synchronized float getBatHeight() {
+        return batHeightNorm;
     }
 
     public synchronized float getSwing() {
@@ -407,12 +415,309 @@ public class BoundaryModel {
         return swingDir;
     }
 
-    public synchronized float getBatAngle() {
-        return batAngle;
+    // =====================================================================
+    // Contact resolution
+    // =====================================================================
+
+    /** SWING button / phone flick / TV OK: play the ball now. */
+    public synchronized void strike() {
+        if ((phase != Phase.BOWLING && phase != Phase.RUNUP) || !ballLive) {
+            return;
+        }
+        float p = deliveryProgress();
+        float z = ballWorldZ(Math.max(0f, p));
+        if (z < -2.4f || z > 0.45f) {
+            swing = 1f; // way out of the window: a practice swing, no effect
+            return;
+        }
+        swingArmed = true;
+        resolveContact(ballWorldX(1f), ballWorldY(1f), z);
     }
 
-    public synchronized float getBatAngleTarget() {
-        return batAngleTarget;
+    private void resolveContact(float bx, float by, float swingZ) {
+        resolved = true;
+        float batX = batWorldX();
+        float batY = batWorldY();
+        float lineErr = Math.abs(bx - batX);
+        float heightErr = Math.abs(by - batY);
+        boolean manual = swingArmed;
+
+        // timing quality: contact happens a touch before the crease; the meter
+        // is 0 (EARLY) .. 0.5 (PERFECT) .. 1 (LATE)
+        float tErr = clamp((-0.35f - swingZ) / 1.6f, -1f, 1f);
+        if (!manual) {
+            tErr = 0.1f; // Smart Assist plays a timed stroke
+        }
+        timingMeter = clamp01(0.5f + tErr * 0.5f);
+        String tLabel = Math.abs(tErr) < 0.25f ? "PERFECT"
+                : Math.abs(tErr) < 0.55f ? "GOOD"
+                : (tErr < 0 ? "EARLY" : "LATE");
+        swingDir = bx >= batX ? 1f : -1f;
+
+        if (lineErr <= CONTACT_LINE && heightErr <= CONTACT_HEIGHT) {
+            float quality = clamp(1f - (lineErr / CONTACT_LINE) * 0.55f
+                    - (heightErr / CONTACT_HEIGHT) * 0.35f
+                    + (manual ? 0.15f - Math.abs(tErr) * 0.2f : 0f), 0.15f, 1f);
+            assistStroke = !manual;
+            wasAssisted = !manual;
+            float loft = clamp(0.35f + (by - BALL_R) / 1.4f * 0.45f
+                    + (manual ? (1f - Math.abs(tErr)) * 0.25f : 0.1f), 0.2f, 1f);
+            float dist = 16f + quality * 50f + loft * 22f;
+            if (manual) {
+                dist *= 1.12f; // a deliberate swing unlocks full bat speed
+            } else {
+                dist = Math.min(dist, 57f); // Smart Assist strokes stay in the field
+            }
+            registerHit(dist, tLabel, loft, manual);
+        } else if (lineErr <= CONTACT_LINE + 0.14f && heightErr <= EDGE_HEIGHT
+                && !"PERFECT".equals(tLabel)) {
+            // top / outside edge on mis-timed height: loops up and is caught
+            registerWicket(true, tLabel);
+        } else {
+            // beaten: carry on toward the stumps / keeper
+            timingLabel = tLabel;
+            ballLive = false;
+            phase = Phase.BOWLING; // keep simulating the carry below
+        }
+    }
+
+    private void registerHit(float dist, String tLabel, float loft, boolean manual) {
+        lastWicket = false;
+        lastBowled = false;
+        lastRuns = bandRuns(dist);
+        runs += lastRuns;
+        balls++;
+        ballLog.add(lastRuns == 0 ? "0" : String.valueOf(lastRuns));
+        distM = Math.round(dist);
+        dirDeg = (int) clamp(90f + getBatAngle() * 0.75f + (random.nextFloat() - 0.5f) * 14f, 30f, 150f);
+        timingLabel = tLabel;
+        resultTitle = headlineFor(lastRuns);
+        resultKicker = lastRuns >= 4 ? "WHAT A SHOT" : "NICELY PLAYED";
+        resultSub = lastRuns == 6 ? "Over the rope. Into the stands."
+                : lastRuns == 4 ? "Raced away to the fence."
+                : "Into the gap.";
+        swing = 1f;
+        checkInningsEnd();
+        flyFromX = ballWorldX(1f);
+        flyFromY = ballWorldY(1f);
+        flyApex = 1.6f + loft * 7.5f + (lastRuns == 6 ? 2.5f : 0f);
+        flyDur = 1.5f + Math.min(0.7f, dist / BOUNDARY_M * 1.4f);
+        flyT = 0f;
+        ballLive = false;
+        flyX = flyFromX;
+        flyY = flyFromY;
+        flyZ = 0f;
+        phase = Phase.FLYING;
+        phaseTimer = 0;
+    }
+
+    private void registerWicket(boolean caught, String tLabel) {
+        lastWicket = true;
+        lastBowled = !caught;
+        lastRuns = 0;
+        wickets++;
+        balls++;
+        ballLog.add("W");
+        timingLabel = tLabel == null ? "EARLY" : tLabel;
+        resultTitle = caught ? "CAUGHT." : "BOWLED.";
+        resultKicker = "WICKET";
+        resultSub = caught ? "A little early. A little too high." : "Through the gate. Timber.";
+        swing = 1f;
+        checkInningsEnd();
+        ballLive = false;
+        if (caught) {
+            phase = Phase.RESULT;
+        } else {
+            stumpAnim = 0f;
+            phase = Phase.BOWLED; // 0.9 s stump knockback, then RESULT
+        }
+        phaseTimer = 0;
+    }
+
+    private void registerDot(String tLabel) {
+        lastWicket = false;
+        lastBowled = false;
+        lastRuns = 0;
+        balls++;
+        ballLog.add("0");
+        timingLabel = tLabel;
+        resultTitle = "JUST MISSED.";
+        resultKicker = "DOT BALL";
+        resultSub = "No contact. No runs. Next ball.";
+        checkInningsEnd();
+        phase = Phase.RESULT;
+        phaseTimer = 0;
+    }
+
+    private void checkInningsEnd() {
+        if (balls >= MAX_BALLS || wickets >= MAX_WICKETS) {
+            gameOver = true;
+        }
+    }
+
+    /** The ball beat the bat: stumps or keeper? (checked at z = +0.60 m) */
+    private void resolveBeaten() {
+        float bx = ballWorldX(1f);
+        float by = ballWorldY(1f);
+        // project the line to the stumps (no further lateral movement after the crease)
+        if (Math.abs(bx) <= 0.13f && by <= 0.73f) {
+            registerWicket(false, timingLabel);
+        } else {
+            registerDot(timingLabel);
+        }
+    }
+
+    public static int bandRuns(float distM) {
+        if (distM < 16f) {
+            return 1;
+        }
+        if (distM < 30f) {
+            return 2;
+        }
+        if (distM < 44f) {
+            return 3;
+        }
+        if (distM < 60f) {
+            return 4;
+        }
+        return 6;
+    }
+
+    // =====================================================================
+    // Frame update
+    // =====================================================================
+
+    public synchronized void update(long dtMs) {
+        now += dtMs;
+        // no-shake EMA glide on both axes
+        batLineDeg += (batLineTarget - batLineDeg) * 0.25f;
+        batHeightNorm += (batHeightTarget - batHeightNorm) * 0.25f;
+        if (swing > 0f) {
+            swing = Math.max(0f, swing - dtMs / 220f); // the 220 ms downswing envelope
+        }
+        phaseTimer += dtMs;
+        switch (phase) {
+            case LOBBY:
+            case READY:
+            case GAME_OVER:
+            case PAUSED:
+                break;
+            case RUNUP:
+                if (phaseTimer >= 900f) { // the model's run-up phase (bowler animation)
+                    phase = Phase.BOWLING;
+                    phaseTimer = 0; // release: the flight clock starts at progress 0
+                }
+                break;
+            case BOWLING: {
+                if (!ballLive) { // beaten ball carrying through to the keeper
+                    if (phaseTimer - travelMs > 260f) {
+                        resolveBeaten();
+                    }
+                    break;
+                }
+                if (phaseTimer >= travelMs && !resolved) {
+                    // the ball reaches the strike plane
+                    if (!swingArmed && smartAssist) {
+                        float bx = ballWorldX(1f);
+                        float by = ballWorldY(1f);
+                        if (Math.abs(bx - batWorldX()) <= CONTACT_LINE
+                                && Math.abs(by - batWorldY()) <= CONTACT_HEIGHT) {
+                            resolveContact(bx, by, -0.35f); // Smart Assist timed stroke
+                        } else {
+                            resolveContact(bx, by, 0f);
+                        }
+                    } else {
+                        resolveContact(ballWorldX(1f), ballWorldY(1f), 0f);
+                    }
+                }
+                if (ballLive && phase == Phase.BOWLING && !bounced && bounces
+                        && deliveryProgress() >= pitchP) {
+                    bounced = true;
+                }
+                if (!ballLive && phase == Phase.BOWLING && resolved && swingArmed) {
+                    // a deliberate swing that missed everything: keep carrying
+                    break;
+                }
+                break;
+            }
+            case FLYING: {
+                flyT = clamp01(phaseTimer / (flyDur * 1000f));
+                float q = flyT;
+                float rad = (float) Math.toRadians(dirDeg);
+                float range = distM / BOUNDARY_M;
+                flyX = flyFromX + (float) Math.cos(rad) * range * 30f * q; // lateral
+                flyZ = -(float) Math.sin(rad) * range * 52f * q;           // into the outfield
+                flyY = BALL_R + flyApex * (float) Math.pow(Math.sin(q * (float) Math.PI), 0.8f);
+                if (phaseTimer >= flyDur * 1000f) {
+                    phase = Phase.RESULT;
+                    phaseTimer = 0;
+                }
+                break;
+            }
+            case BOWLED: {
+                stumpAnim = clamp01(phaseTimer / 900f);
+                if (phaseTimer >= 900f) {
+                    stumpAnim = 1f;
+                    phase = Phase.RESULT;
+                    phaseTimer = 0;
+                }
+                break;
+            }
+            case RESULT:
+                if (phaseTimer >= 6000f) { // auto-advance: the game never stalls
+                    nextBall();
+                }
+                break;
+        }
+    }
+
+    public synchronized float getStumpAnim() {
+        return stumpAnim < 0f ? 0f : stumpAnim;
+    }
+
+    // =====================================================================
+    // Snapshot / readouts
+    // =====================================================================
+
+    public synchronized Phase getPhase() {
+        return phase;
+    }
+
+    public synchronized boolean isBallLive() {
+        return ballLive;
+    }
+
+    public synchronized boolean isBounced() {
+        return bounced;
+    }
+
+    public synchronized int getOverIndex() {
+        return Math.min(balls / 6, MAX_OVERS - 1);
+    }
+
+    public synchronized String getOverType() {
+        return OVER_NAMES[getOverIndex()];
+    }
+
+    public synchronized String getOverLabel() {
+        int o = getOverIndex();
+        return "OVER " + (o + 1) + "/" + MAX_OVERS + " · " + OVER_NAMES[o];
+    }
+
+    public synchronized String getOverHint() {
+        return OVER_HINTS[getOverIndex()];
+    }
+
+    public synchronized String getDelivery() {
+        return delivery;
+    }
+
+    public synchronized String getDeliveryHint() {
+        return deliveryHint;
+    }
+
+    public synchronized String getTimingLabel() {
+        return timingLabel;
     }
 
     public synchronized int getRuns() {
@@ -431,29 +736,8 @@ public class BoundaryModel {
         return gameOver;
     }
 
-    public synchronized String getDelivery() {
-        return delivery;
-    }
-
-    public synchronized String getDeliveryHint() {
-        return deliveryHint;
-    }
-
-    public synchronized String getTimingLabel() {
-        return timingLabel;
-    }
-
-    public synchronized String getPopup() {
-        return now < popupUntil ? popup : "";
-    }
-
-    public synchronized List<String> getLastBalls(int n) {
-        List<String> out = new ArrayList<String>();
-        int from = Math.max(0, ballLog.size() - n);
-        for (int i = from; i < ballLog.size(); i++) {
-            out.add(ballLog.get(i));
-        }
-        return out;
+    public synchronized boolean wasAssistedStroke() {
+        return wasAssisted;
     }
 
     public String oversText() {
@@ -470,8 +754,17 @@ public class BoundaryModel {
     }
 
     public String history() {
-        return "OVERS " + oversText() + "  ·  " + (MAX_BALLS - getBalls()) + " balls remaining"
-                + (isGameOver() ? "  ·  INNINGS COMPLETE" : "");
+        return "OVERS " + oversText() + " · " + (MAX_BALLS - getBalls()) + " balls remaining"
+                + (isGameOver() ? " · INNINGS COMPLETE" : "");
+    }
+
+    public synchronized List<String> getLastBalls(int n) {
+        List<String> out = new ArrayList<String>();
+        int from = Math.max(0, ballLog.size() - n);
+        for (int i = from; i < ballLog.size(); i++) {
+            out.add(ballLog.get(i));
+        }
+        return out;
     }
 
     public synchronized int fours() {
@@ -498,22 +791,206 @@ public class BoundaryModel {
         return distM;
     }
 
-    public synchronized String ballByBall() {
-        StringBuilder sb = new StringBuilder();
-        for (int over = 0; over < MAX_OVERS; over++) {
-            sb.append("Over ").append(over + 1).append(" (").append(OVER_NAMES[over]).append("): ");
-            int start = over * 6;
-            int end = Math.min(start + 6, ballLog.size());
-            for (int i = start; i < end; i++) {
-                sb.append(ballLog.get(i));
-                if (i < end - 1) {
-                    sb.append(", ");
-                }
-            }
-            if (over < MAX_OVERS - 1) {
-                sb.append("   ");
+    public synchronized int boundaryRuns() {
+        return fours() * 4 + sixes() * 6;
+    }
+
+    public synchronized float runRate() {
+        float overs = Math.max(0.1f, balls / 6f);
+        return runs / overs;
+    }
+
+    /** Runs scored in over i (0-based). */
+    public synchronized int overRuns(int over) {
+        int start = over * 6;
+        int end = Math.min(start + 6, ballLog.size());
+        int sum = 0;
+        for (int i = start; i < end; i++) {
+            String s = ballLog.get(i);
+            sum += s.equals("W") ? 0 : Integer.parseInt(s);
+        }
+        return sum;
+    }
+
+    /** Result headline for a hit: SIX. / FOUR. / ... / SINGLE. */
+    public static String headlineFor(int runs) {
+        switch (runs) {
+            case 6: return "SIX.";
+            case 4: return "FOUR.";
+            case 3: return "THREE.";
+            case 2: return "TWO.";
+            case 1: return "SINGLE.";
+            default: return "JUST MISSED.";
+        }
+    }
+
+    /** Phone-facing STATE payload (protocol v3 keys). */
+    public synchronized Map<String, String> stateMap() {
+        Map<String, String> kv = new LinkedHashMap<String, String>();
+        Phase p = phase;
+        String screen;
+        if (p == Phase.LOBBY) {
+            screen = "LOBBY";
+        } else if (p == Phase.READY) {
+            screen = "READY";
+        } else if (p == Phase.PAUSED) {
+            screen = "PAUSED";
+        } else if (p == Phase.GAME_OVER) {
+            screen = "GAME_OVER";
+        } else if (p == Phase.RESULT) {
+            screen = "RESULT";
+        } else if (p == Phase.FLYING) {
+            screen = "FLYING";
+        } else {
+            screen = "IN_PLAY";
+        }
+        kv.put("screen", screen);
+        kv.put("score", scoreText());
+        kv.put("overs", oversText());
+        kv.put("over", getOverLabel());
+        kv.put("ball", String.valueOf(balls < MAX_BALLS ? balls + 1 : balls));
+        kv.put("last3", join(getLastBalls(3), ","));
+        kv.put("delivery", delivery);
+        kv.put("bounces", String.valueOf(bounces));
+        kv.put("assist", String.valueOf(smartAssist));
+        kv.put("line", String.format("%.1f", batLineDeg));
+        kv.put("height", String.format("%.2f", batHeightNorm));
+        kv.put("canStart", String.valueOf(p == Phase.READY || p == Phase.LOBBY));
+        kv.put("canNext", String.valueOf(p == Phase.RESULT));
+        kv.put("hint", phaseHintText());
+        return kv;
+    }
+
+    /** The subtitle the phone shows during play ("Watch the ball", ...). */
+    public synchronized String phaseHintText() {
+        switch (phase) {
+            case RUNUP:
+            case BOWLING: return bounces ? "Read the bounce. Stay ready." : "No bounce — drive it early.";
+            case FLYING: return "Follow the ball.";
+            case RESULT: return "Reset your stance.";
+            case READY: return "Start your innings when you're ready.";
+            default: return "";
+        }
+    }
+
+    // =====================================================================
+    // Debug demo states for visual QA (adb --es demo SIX / DOT / ...)
+    // =====================================================================
+    public synchronized void demo(String state) {
+        reset();
+        if ("LOBBY".equals(state)) {
+            return; // fresh lobby with the pairing code
+        }
+        if ("PAUSED".equals(state)) {
+            startInnings();
+            pause();
+            return;
+        }
+        startInnings(); // READY -> first delivery begins (plays out live)
+        if ("FACE".equals(state) || "DELIVERY".equals(state)) {
+            return;
+        }
+        // freeze into a representative moment for the remaining QA states
+        phase = Phase.RESULT;
+        phaseTimer = 0;
+        ballLive = false;
+        delivery = "GOOD LENGTH";
+        deliveryHint = "Watch for the rise";
+        if ("SIX".equals(state) || "FLIGHT".equals(state)) {
+            balls = 3;
+            runs = 18;
+            lastRuns = 6;
+            resultTitle = "SIX.";
+            resultKicker = "WHAT A SHOT";
+            resultSub = "Clean contact · lofted drive";
+            timingLabel = "PERFECT";
+            timingMeter = 0.5f;
+            distM = 62;
+            dirDeg = 84;
+            ballLog.add("1");
+            ballLog.add("4");
+            ballLog.add("6");
+        } else if ("DOT".equals(state)) {
+            balls = 1;
+            lastRuns = 0;
+            resultTitle = "JUST MISSED.";
+            resultSub = "You swung too late. Start your swing a little sooner.";
+            timingLabel = "LATE";
+            timingMeter = 0.85f;
+            distM = 0;
+            dirDeg = 90;
+            ballLog.add("0");
+        } else if ("CAUGHT".equals(state)) {
+            balls = 4;
+            wickets = 1;
+            lastRuns = 0;
+            lastWicket = true;
+            resultTitle = "CAUGHT.";
+            resultKicker = "WICKET";
+            resultSub = "Caught in the forward field.";
+            timingLabel = "EARLY";
+            timingMeter = 0.15f;
+            distM = 18;
+            dirDeg = 60;
+            ballLog.add("2");
+            ballLog.add("0");
+            ballLog.add("1");
+            ballLog.add("W");
+        } else if ("BOWLED".equals(state)) {
+            balls = 2;
+            wickets = 1;
+            lastRuns = 0;
+            lastWicket = true;
+            lastBowled = true;
+            resultTitle = "BOWLED.";
+            resultKicker = "BOWLED";
+            resultSub = "The ball sneaked under the bat and hit the stumps.";
+            timingMeter = 0.5f;
+            distM = 0;
+            dirDeg = 90;
+            ballLog.add("W");
+            ballLog.add("W");
+        } else if ("INNINGS".equals(state)) {
+            phase = Phase.GAME_OVER;
+            gameOver = true;
+            runs = 42;
+            wickets = 2;
+            balls = 30;
+            distM = 74;
+            dirDeg = 100;
+            String[] log = {"1", "4", "0", "2", "6", "1", "0", "W", "1", "2", "4", "0",
+                    "1", "1", "0", "2", "4", "1", "6", "0", "W", "1", "2", "0", "4", "1", "2", "6", "1", "2"};
+            for (String s : log) {
+                ballLog.add(s);
             }
         }
-        return sb.toString().trim();
+    }
+
+    private static String join(List<String> list, String sep) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) {
+                sb.append(sep);
+            }
+            sb.append(list.get(i));
+        }
+        return sb.toString();
+    }
+
+    private static float lerp(float a, float b, float x) {
+        return a + (b - a) * x;
+    }
+
+    private static float clamp(float v, float a, float b) {
+        return v < a ? a : (v > b ? b : v);
+    }
+
+    private static float clamp01(float v) {
+        return clamp(v, 0f, 1f);
+    }
+
+    private static float smooth01(float x) {
+        x = clamp01(x);
+        return 0.5f - 0.5f * (float) Math.cos(x * Math.PI);
     }
 }
