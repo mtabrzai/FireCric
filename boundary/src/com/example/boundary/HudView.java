@@ -2,523 +2,859 @@ package com.example.boundary;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
-import android.os.SystemClock;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.view.View;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
- * 2D overlay on top of the 3D scene: HUD bars + designed panels, plus a 2D fallback
- * field that replicates the 3D visual when OpenGL is unavailable (field2D).
+ * The Figma-exact TV overlay for Boundary v3.1.
+ *
+ * Drawn on a 1920x1080 design canvas (Figma px == canvas px, the canvas is
+ * scaled to the physical screen). Uses the Inter family from assets and the
+ * exact Figma palette: deep green-black #060F0E, panels #091C19/#132D25,
+ * lime #D7FF67, willow #F6F8EE, muted #AEBFB7, dividers #33463E, coral
+ * #FF895E, ball #F15D4D. Screens: lobby with the 6-digit code, in-play top
+ * and bottom bars with delivery tags, the shot-breakdown result with the
+ * 120° forward field, dot / wicket with the YOUR SWING timing meter, the
+ * innings wrap, and the game-paused dialog. Pills are D-pad focusable with
+ * a willow focus ring. If OpenGL is unavailable this view also renders a
+ * clean procedural 2D pitch fallback (field2D) beneath the HUD.
  */
 public class HudView extends View {
 
+    // ---- Figma palette -----------------------------------------------------
+    private static final int BG = 0xFF060F0E;
+    private static final int PANEL = 0xFF091C19;
+    private static final int PANEL2 = 0xFF132D25;
+    private static final int LIME = 0xFFD7FF67;
+    private static final int WILLOW = 0xFFF6F8EE;
+    private static final int MUTED = 0xFFAEBFB7;
+    private static final int DIV = 0xFF33463E;
+    private static final int CORAL = 0xFFFF895E;
+    private static final int BALLRED = 0xFFF15D4D;
+
+    // translucent variants (alpha from the Figma frames)
+    private static final int SCRIM = 0x92091C19;      // rgba(9,28,25,0.57)
+    private static final int PANEL_A = 0xF5091C19;    // rgba(9,28,25,0.96)
+    private static final int TOP_BAR = 0xB3091C19;    // 70%
+    private static final int BOT_BAR = 0xE0091C19;    // 88%
+
     private BoundaryModel model;
+    private String phoneName;      // null when no bat is connected
+    private String pairingCode = "000000";
+    private String tvName = "Fire TV";
+    private boolean field2D;        // 2D fallback when GL is unavailable
+    private String demo;            // debug state override
+    private long clockMs;
 
-    public volatile String pairingCode = "000 000";
-    public volatile String ipText = "";
-    public volatile String serverError = "";
-    public volatile int rxCount;
-    public volatile boolean phoneConnected = true;
-    public volatile boolean everConnected;
-    public volatile boolean field2D; // GL fallback
+    // focus management for D-pad pills
+    private int focus = 0;
 
-    private final Paint white = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint muted = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint lime = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint red = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint panel = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint panelLight = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF r = new RectF();
+    private final Path path = new Path();
+    private Typeface reg, med, semi, bold;
 
-    public HudView(Context context) {
-        super(context);
-        white.setColor(0xFFF6F8EE);
-        muted.setColor(0xFFAEBFB7);
-        lime.setColor(0xFFD7FF67);
-        red.setColor(0xFFFF895E);
-        panel.setColor(0xCC132D25);
-        // v2.6: the shot-result panel uses a lighter fill so the 3D scene
-        // stays visible behind it between balls
-        panelLight.setColor(0x66132D25);
-        ringPaint.setStyle(Paint.Style.STROKE);
-        ringPaint.setStrokeWidth(10f);
+    public HudView(Context ctx) {
+        super(ctx);
+        setLayerType(LAYER_TYPE_SOFTWARE, null);
+        loadFonts(ctx);
+    }
+
+    private void loadFonts(Context ctx) {
+        try {
+            reg = Typeface.createFromAsset(ctx.getAssets(), "fonts/Inter-Regular.ttf");
+            med = Typeface.createFromAsset(ctx.getAssets(), "fonts/Inter-Medium.ttf");
+            semi = Typeface.createFromAsset(ctx.getAssets(), "fonts/Inter-SemiBold.ttf");
+            bold = Typeface.createFromAsset(ctx.getAssets(), "fonts/Inter-Bold.ttf");
+        } catch (Exception e) {
+            reg = med = semi = bold = null;
+        }
+        if (reg == null) {
+            reg = Typeface.SANS_SERIF;
+            med = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL);
+            semi = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD);
+            bold = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD);
+        }
     }
 
     public void setModel(BoundaryModel m) {
         model = m;
     }
 
-    private void text(Canvas c, Paint p, float size, String s, float x, float y) {
-        p.setTextSize(size);
-        c.drawText(s, x, y, p);
+    public void setPhone(String name) {
+        phoneName = name;
     }
 
-    private void centerText(Canvas c, Paint p, float size, String s, float cx, float y) {
-        p.setTextSize(size);
-        p.setTextAlign(Paint.Align.CENTER);
-        c.drawText(s, cx, y, p);
-        p.setTextAlign(Paint.Align.LEFT);
+    public void setPairing(String code, String tv) {
+        if (code != null) {
+            pairingCode = code;
+        }
+        if (tv != null) {
+            tvName = tv;
+        }
+    }
+
+    public void setField2D(boolean b) {
+        field2D = b;
+    }
+
+    public void setDemo(String state) {
+        demo = state;
+    }
+
+    /** Pills available on the current screen; see pillAction(). */
+    public int pillCount() {
+        String s = screen();
+        if (s.equals("lobby")) {
+            return 1;                       // START INNINGS (once a bat is paired)
+        }
+        if (s.equals("result")) {
+            return 1;                       // NEXT DELIVERY
+        }
+        if (s.equals("gameover")) {
+            return 2;                       // PLAY AGAIN / BACK TO LOBBY
+        }
+        if (s.equals("paused")) {
+            return 2;                       // RESUME / BACK TO LOBBY
+        }
+        return 0;
+    }
+
+    public String pillAction(int i) {
+        String s = screen();
+        if (s.equals("lobby")) {
+            return "start";
+        }
+        if (s.equals("result")) {
+            return "next";
+        }
+        if (s.equals("gameover")) {
+            return i == 0 ? "again" : "lobby";
+        }
+        if (s.equals("paused")) {
+            return i == 0 ? "resume" : "lobby";
+        }
+        return "";
+    }
+
+    public void focusNext() {
+        int n = pillCount();
+        if (n > 0) {
+            focus = (focus + 1) % n;
+            invalidate();
+        }
+    }
+
+    public void focusPrev() {
+        int n = pillCount();
+        if (n > 0) {
+            focus = (focus + n - 1) % n;
+            invalidate();
+        }
+    }
+
+    public void resetFocus() {
+        focus = 0;
+    }
+
+    /** Index of the currently focused pill (for OK on the remote). */
+    public int focusIndex() {
+        return focus;
+    }
+
+    /** Current screen key from the model phase (or the debug demo state). */
+    private String screen() {
+        if (demo != null) {
+            if (demo.equals("LOBBY")) {
+                return "lobby";
+            }
+            if (demo.equals("FACE") || demo.equals("DELIVERY")) {
+                return "play";
+            }
+            if (demo.equals("FLIGHT") || demo.equals("SIX") || demo.equals("DOT")
+                    || demo.equals("CAUGHT")) {
+                return "result";
+            }
+            if (demo.equals("INNINGS")) {
+                return "gameover";
+            }
+            if (demo.equals("PAUSED")) {
+                return "paused";
+            }
+        }
+        if (model == null) {
+            return "lobby";
+        }
+        BoundaryModel.Phase ph = model.getPhase();
+        switch (ph) {
+            case LOBBY:
+            case READY:
+                return "lobby";
+            case RUNUP:
+            case BOWLING:
+            case FLYING:
+            case BOWLED:
+                return "play";
+            case RESULT:
+                return "result";
+            case GAME_OVER:
+                return "gameover";
+            case PAUSED:
+            default:
+                return "paused";
+        }
     }
 
     @Override
-    protected void onDraw(Canvas canvas) {
-        super.onDraw(canvas);
-        int w = getWidth();
-        int h = getHeight();
-        if (w <= 0 || h <= 0 || model == null) {
+    protected void onDraw(Canvas c) {
+        clockMs = android.os.SystemClock.uptimeMillis();
+        float sx = getWidth() / 1920f;
+        float sy = getHeight() / 1080f;
+        c.save();
+        c.scale(sx, sy);
+
+        String s = screen();
+        if (field2D && (s.equals("play"))) {
+            draw2DScene(c);
+        } else if (!field2D) {
+            c.drawColor(BG); // GL failed to init: still avoid flicker
+        }
+        if (field2D && !s.equals("play")) {
+            c.drawColor(BG);
+        }
+
+        switch (s) {
+            case "lobby":
+                drawLobby(c);
+                break;
+            case "play":
+                drawPlayHud(c);
+                break;
+            case "result":
+                drawResult(c);
+                break;
+            case "gameover":
+                drawInnings(c);
+                break;
+            case "paused":
+                drawPaused(c);
+                break;
+        }
+        c.restore();
+    }
+
+    // =====================================================================
+    // Typography helpers (Figma px sizes, Inter)
+    // =====================================================================
+    private void text(Canvas c, String t, float x, float y, Typeface f, float size, int color) {
+        p.setTypeface(f);
+        p.setTextSize(size);
+        p.setColor(color);
+        c.drawText(t, x, y, p);
+    }
+
+    private void textCenter(Canvas c, String t, float cx, float y, Typeface f, float size, int color) {
+        p.setTypeface(f);
+        p.setTextSize(size);
+        p.setColor(color);
+        float w = p.measureText(t);
+        c.drawText(t, cx - w / 2f, y, p);
+    }
+
+    private void textRight(Canvas c, String t, float rx, float y, Typeface f, float size, int color) {
+        p.setTypeface(f);
+        p.setTextSize(size);
+        p.setColor(color);
+        float w = p.measureText(t);
+        c.drawText(t, rx - w, y, p);
+    }
+
+    private void caps(Canvas c, String t, float x, float y, float size, int color) {
+        text(c, t.toUpperCase(Locale.ROOT), x, y, semi, size, color);
+    }
+
+    private void panel(Canvas c, float x, float y, float w, float h, int fill) {
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(fill);
+        r.set(x, y, x + w, y + h);
+        c.drawRoundRect(r, 24f, 24f, p);
+    }
+
+    private void strokePanel(Canvas c, float x, float y, float w, float h) {
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(2f);
+        p.setColor(DIV);
+        r.set(x, y, x + w, y + h);
+        c.drawRoundRect(r, 24f, 24f, p);
+        p.setStyle(Paint.Style.FILL);
+    }
+
+    /** Rounded pill; returns the rect for focus ring drawing. */
+    private RectF pill(Canvas c, String label, float cx, float cy, float w, float h,
+                       boolean lime, boolean focused) {
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(lime ? LIME : PANEL);
+        r.set(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f);
+        c.drawRoundRect(r, Math.min(23f, h / 2f), Math.min(23f, h / 2f), p);
+        if (focused) {
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(5f);
+            p.setColor(WILLOW);
+            r.inset(-7f, -7f);
+            c.drawRoundRect(r, 28f, 28f, p);
+            p.setStyle(Paint.Style.FILL);
+        }
+        textCenter(c, label, cx, cy + (lime ? 13f : 12f), semi, 28f, lime ? BG : WILLOW);
+        r.set(cx - w / 2f - 12f, cy - h / 2f - 12f, cx + w / 2f + 12f, cy + h / 2f + 12f);
+        return r;
+    }
+
+    // =====================================================================
+    // Lobby (Figma frame 01)
+    // =====================================================================
+    private void drawLobby(Canvas c) {
+        // headline block, left column
+        caps(c, "01 / CONNECT YOUR BAT", 104, 210, 26f, LIME);
+        text(c, "Your phone.", 104, 300, bold, 76f, WILLOW);
+        text(c, "Your bat.", 104, 384, bold, 76f, WILLOW);
+        text(c, "Your big moment.", 104, 468, bold, 76f, LIME);
+        text(c, "Boundary turns your phone into the bat. Tilt to aim, swing to hit.", 104, 530, reg, 28f, MUTED);
+
+        // quick-play card under the headline
+        panel(c, 104, 610, 420, 170, PANEL_A);
+        strokePanel(c, 104, 610, 420, 170);
+        caps(c, "QUICK PLAY", 140, 668, 24f, LIME);
+        text(c, "5 OVERS", 140, 726, bold, 44f, WILLOW);
+        text(c, "30 balls. Five overs, five bowling phases.", 140, 760, reg, 24f, MUTED);
+
+        // pairing panel (right)
+        float px = 1080, py = 224, pw = 728, ph = 650;
+        panel(c, px, py, pw, ph, PANEL_A);
+        strokePanel(c, px, py, pw, ph);
+        caps(c, "PAIR YOUR PHONE", px + 64, py + 78, 26f, LIME);
+        text(c, "On your phone, enter this code:", px + 64, py + 132, reg, 26f, MUTED);
+
+        // the 6-digit code, Bold 88 lime, letterspaced
+        p.setTypeface(bold);
+        p.setTextSize(88f);
+        p.setColor(LIME);
+        p.setLetterSpacing(0.12f);
+        float cw = p.measureText(pairingCode);
+        c.drawText(pairingCode, px + (pw - cw) / 2f, py + 262, p);
+        p.setLetterSpacing(0f);
+
+        // divider + TV name
+        p.setColor(DIV);
+        p.setStrokeWidth(2f);
+        c.drawLine(px + 64, py + 310, px + pw - 64, py + 310, p);
+        caps(c, "THIS TV", px + 64, py + 362, 22f, MUTED);
+        text(c, tvName, px + 64, py + 420, semi, 40f, WILLOW);
+        text(c, "Fire TV app · living room", px + 64, py + 452, reg, 24f, MUTED);
+
+        boolean ready = model != null && model.getPhase() == BoundaryModel.Phase.READY;
+        if (ready) {
+            // bat paired: offer the start
+            p.setColor(LIME);
+            c.drawCircle(px + 84, py + 512, 11f, p);
+            text(c, phoneName != null ? phoneName + " is ready" : "Bat ready", px + 112, py + 522, semi, 28f, LIME);
+            pill(c, "START INNINGS", px + pw / 2f, py + 578, 460, 66, true, focus == 0 && pillCount() > 0);
+        } else {
+            // waiting pill with a soft pulse
+            float pulse = 0.55f + 0.45f * (0.5f + 0.5f * (float) Math.sin(clockMs / 500.0));
+            p.setColor(LIME);
+            p.setAlpha((int) (255 * pulse));
+            c.drawCircle(px + 84, py + 512, 11f, p);
+            p.setAlpha(255);
+            text(c, "WAITING FOR YOUR PHONE…", px + 112, py + 522, semi, 28f, WILLOW);
+            text(c, "No phone? You can also play with the Fire TV remote (D-pad).",
+                    px + 64, py + 580, reg, 24f, MUTED);
+        }
+        drawBottomBarBase(c);
+    }
+
+    // =====================================================================
+    // In-play HUD (Figma frames 02 / 07 / 08)
+    // =====================================================================
+    private void drawPlayHud(Canvas c) {
+        drawTopBar(c);
+        drawBottomBar(c);
+
+        BoundaryModel.Phase ph = model.getPhase();
+        boolean bowling = ph == BoundaryModel.Phase.BOWLING;
+        boolean runup = ph == BoundaryModel.Phase.RUNUP;
+
+        // delivery tag (left, mid-screen) once the bowler is running in
+        if (runup || bowling) {
+            float ty = 386;
+            caps(c, model.getOverLabel(), 104, ty, 26f, LIME);
+            text(c, model.getDelivery(), 104, ty + 74, bold, 64f, WILLOW);
+            text(c, model.getDeliveryHint(), 104, ty + 122, med, 30f, MUTED);
+        }
+
+        // SWING NOW prompt as the ball nears the bat
+        if (bowling && model.isBallLive()) {
+            float prog = model.deliveryProgress();
+            if (prog > 0.45f && prog < 1.02f) {
+                float pulse = 1f + 0.05f * (float) Math.sin(clockMs / 90.0);
+                float w = 380 * pulse;
+                c.save();
+                p.setColor(LIME);
+                r.set(960 - w / 2f, 800, 960 + w / 2f, 800 + 88);
+                c.drawRoundRect(r, 24f, 24f, p);
+                textCenter(c, "SWING NOW", 960, 858, bold, 40f, BG);
+                c.restore();
+            }
+            // bouncing vs full-toss callout
+            if (!model.willBounce()) {
+                caps(c, "FULL TOSS · NO BOUNCE", 104, 300, 24f, CORAL);
+            }
+        }
+
+        // shot-in-flight contact tag
+        if (ph == BoundaryModel.Phase.FLYING) {
+            caps(c, "04 / SHOT IN FLIGHT", 104, 386, 26f, LIME);
+            text(c, model.getTimingLabel().isEmpty() ? "PERFECT" : model.getTimingLabel().toUpperCase(Locale.ROOT),
+                    104, 460, bold, 64f, LIME);
+            text(c, "Middle of the bat. Into the gap.", 104, 508, med, 30f, WILLOW);
+        }
+        if (ph == BoundaryModel.Phase.BOWLED) {
+            text(c, "BOWLED.", 104, 460, bold, 84f, CORAL);
+            text(c, "Through the gate. Bails flying.", 104, 514, med, 30f, WILLOW);
+        }
+    }
+
+    private void drawTopBar(Canvas c) {
+        p.setColor(TOP_BAR);
+        c.drawRect(0, 0, 1920, 200, p);
+
+        // wordmark + tagline
+        text(c, "BOUNDARY", 64, 92, bold, 44f, LIME);
+        text(c, "CRICKET. IN YOUR HANDS.", 64, 142, reg, 24f, MUTED);
+
+        // centre score panel
+        panel(c, 660, 26, 600, 148, PANEL_A);
+        strokePanel(c, 660, 26, 600, 148);
+        p.setTypeface(bold);
+        p.setTextSize(66f);
+        p.setColor(WILLOW);
+        float sw = p.measureText("YOU");
+        c.drawText("YOU", 960 - sw - 24, 110, p);
+        String score = model == null ? "0 / 0" : model.scoreText();
+        p.setTextSize(66f);
+        float scw = p.measureText(score);
+        c.drawText(score, 960 + 24, 110, p);
+        textCenter(c, model == null ? "OVERS 0.0 / 5" : "OVERS " + model.oversText(), 960, 152, reg, 26f, MUTED);
+
+        // connection pill (right)
+        boolean conn = phoneName != null;
+        float px = conn ? 1740 : 1690;
+        p.setColor(PANEL2);
+        r.set(px - 230, 64, px, 136);
+        c.drawRoundRect(r, 36f, 36f, p);
+        p.setColor(conn ? LIME : CORAL);
+        c.drawCircle(px - 196, 100, 11f, p);
+        textRight(c, conn ? "PHONE CONNECTED" : "NO PHONE", px - 28, 110, semi, 26f, WILLOW);
+    }
+
+    private void drawBottomBarBase(Canvas c) {
+        p.setColor(BOT_BAR);
+        c.drawRect(0, 886, 1920, 1080, p);
+    }
+
+    private void drawBottomBar(Canvas c) {
+        drawBottomBarBase(c);
+
+        // ball number + phase
+        int ballNo = model == null ? 1 : model.getBalls() + 1;
+        caps(c, String.format(Locale.US, "%02d BALL", ballNo), 64, 948, 26f, LIME);
+        text(c, model == null ? "OVER 1/5 · PACE" : model.getOverLabel(), 64, 996, semi, 30f, WILLOW);
+        text(c, model == null ? "" : model.getOverHint(), 64, 1036, reg, 24f, MUTED);
+
+        // centre hint line
+        textCenter(c, "Watch the ball. Time your swing.", 960, 990, med, 28f, MUTED);
+
+        // LAST 3 BALLS chips (right)
+        caps(c, "LAST 3 BALLS", 1856 - 260, 948, 24f, MUTED);
+        List<String> last = model == null ? null : model.getLastBalls(3);
+        for (int i = 0; i < 3; i++) {
+            float cx = 1500 + i * 72;
+            float cy = 1010;
+            String v = (last != null && last.size() >= 3) ? last.get(last.size() - 3 + i) : null;
+            p.setColor(PANEL2);
+            r.set(cx, cy - 26, cx + 52, cy + 26);
+            c.drawRoundRect(r, 14f, 14f, p);
+            int col;
+            boolean big = "6".equals(v) || "4".equals(v);
+            boolean wick = "W".equals(v);
+            if (big) {
+                col = LIME;
+            } else if (wick) {
+                col = CORAL;
+            } else {
+                col = MUTED;
+            }
+            textCenter(c, v == null ? "–" : v, cx + 26, cy + 10, semi, 28f, col);
+        }
+    }
+
+    // =====================================================================
+    // Result screens (Figma frames 03 / 09 / 10)
+    // =====================================================================
+    private void drawResult(Canvas c) {
+        // the scene stays faintly visible under a 57% scrim
+        p.setColor(SCRIM);
+        c.drawRect(0, 0, 1920, 1080, p);
+
+        boolean wicket = model != null && model.lastWicket;
+        boolean hit = model != null && !wicket && model.lastRuns > 0;
+        int accent = wicket ? CORAL : LIME;
+
+        // kicker + giant result word
+        String kicker = "DOT BALL";
+        String word = "JUST MISSED.";
+        if (hit) {
+            kicker = model.resultKicker.isEmpty() ? "WHAT A SHOT" : model.resultKicker;
+            word = model.resultTitle.isEmpty() ? BoundaryModel.headlineFor(model.lastRuns) : model.resultTitle;
+        } else if (wicket) {
+            kicker = model.lastBowled ? "BOWLED" : "WICKET";
+            word = model.resultTitle.isEmpty() ? (model.lastBowled ? "BOWLED." : "CAUGHT.") : model.resultTitle;
+        }
+        caps(c, kicker, 104, 300, 32f, accent);
+        text(c, word, 96, 490, bold, 190f, wicket ? CORAL : WILLOW);
+
+        if (hit) {
+            // timing pill + score
+            String tl = model.getTimingLabel();
+            if (tl != null && !tl.isEmpty()) {
+                float tw = 60 + tl.length() * 22f;
+                p.setColor(LIME);
+                r.set(104, 540, 104 + tw, 540 + 56);
+                c.drawRoundRect(r, 28f, 28f, p);
+                text(c, tl.toUpperCase(Locale.ROOT), 128, 580, semi, 26f, BG);
+            }
+            text(c, "YOU " + model.scoreText(), 104, 700, bold, 66f, WILLOW);
+            if (model.wasAssistedStroke()) {
+                text(c, "Smart Assist played the shot", 104, 748, reg, 24f, MUTED);
+            }
+
+            // FORWARD FIELD: 120° arc with the shot needle
+            drawForwardField(c, 620, 940, model.dirDeg);
+
+            // SHOT BREAKDOWN panel
+            drawShotBreakdown(c);
+        } else {
+            // YOUR SWING panel with the timing meter
+            drawYourSwing(c, kicker, word);
+        }
+
+        // Next delivery pill
+        boolean showNext = model == null || !model.isGameOver();
+        if (showNext) {
+            pill(c, "Next delivery", 1635, 953, 370, 66, true, focus == 0 && pillCount() > 0);
+        }
+    }
+
+    /** 120° forward field arc (Figma frame 03) with the shot-direction needle. */
+    private void drawForwardField(Canvas c, float cx, float cy, float dirDeg) {
+        float rad = 300f;
+        caps(c, "FORWARD FIELD", cx - 96, cy - rad - 74, 24f, MUTED);
+
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0x2ED7FF67); // translucent lime wedge
+        path.reset();
+        path.moveTo(cx, cy);
+        path.arcTo(new RectF(cx - rad, cy - rad, cx + rad, cy + rad), 180f + 30f, 120f);
+        path.close();
+        c.drawPath(path, p);
+
+        // arc outline + ticks every 30°
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(4f);
+        p.setColor(DIV);
+        c.drawArc(new RectF(cx - rad, cy - rad, cx + rad, cy + rad), 210f, 120f, false, p);
+        p.setColor(MUTED);
+        for (int deg = 30; deg <= 150; deg += 30) {
+            double a = Math.toRadians(deg);
+            float x0 = cx + (float) Math.cos(a) * (rad - 10);
+            float y0 = cy - (float) Math.sin(a) * (rad - 10);
+            float x1 = cx + (float) Math.cos(a) * (rad + 10);
+            float y1 = cy - (float) Math.sin(a) * (rad + 10);
+            c.drawLine(x0, y0, x1, y1, p);
+            textCenter(c, deg + "°", cx + (float) Math.cos(a) * (rad + 40),
+                    cy - (float) Math.sin(a) * (rad + 40) + 8, reg, 22f, MUTED);
+        }
+        p.setStyle(Paint.Style.FILL);
+
+        // shot direction needle
+        float clamped = Math.max(30f, Math.min(150f, dirDeg));
+        double a = Math.toRadians(clamped);
+        float nx = cx + (float) Math.cos(a) * (rad - 26);
+        float ny = cy - (float) Math.sin(a) * (rad - 26);
+        p.setStrokeWidth(8f);
+        p.setColor(WILLOW);
+        c.drawLine(cx, cy, nx, ny, p);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(WILLOW);
+        c.drawCircle(nx, ny, 12f, p);
+        textCenter(c, (int) clamped + "°", cx, cy - rad - 30, semi, 26f, WILLOW);
+    }
+
+    private void drawShotBreakdown(Canvas c) {
+        float x = 1070, y = 253, w = 746, h = 585;
+        panel(c, x, y, w, h, PANEL_A);
+        strokePanel(c, x, y, w, h);
+        caps(c, "SHOT BREAKDOWN", x + 56, y + 72, 26f, LIME);
+        row(c, x + 56, y + 130, "DISTANCE", model.distM + " m");
+        row(c, x + 56, y + 218, "DIRECTION", model.dirDeg + "°");
+        row(c, x + 56, y + 306, "SWING TIMING", model.getTimingLabel().isEmpty()
+                ? "PERFECT" : model.getTimingLabel());
+        row(c, x + 56, y + 394, "FORWARD HITTING ZONE",
+                model.getTimingLabel().isEmpty() ? "MIDDLE OF THE BAT" : model.getTimingLabel());
+        if (!model.resultSub.isEmpty()) {
+            text(c, model.resultSub, x + 56, y + 480, reg, 24f, MUTED);
+        }
+    }
+
+    private void row(Canvas c, float x, float y, String label, String value) {
+        text(c, label, x, y, reg, 23f, MUTED);
+        textRight(c, value.toUpperCase(Locale.ROOT), x + 634, y, semi, 25f, WILLOW);
+        p.setColor(DIV);
+        p.setStrokeWidth(2f);
+        c.drawLine(x, y + 26, x + 634, y + 26, p);
+    }
+
+    /** YOUR SWING panel (Figma frames 09 / 10): timing meter with marker. */
+    private void drawYourSwing(Canvas c, String kicker, String word) {
+        float x = 1070, y = 253, w = 746, h = 585;
+        panel(c, x, y, w, h, PANEL_A);
+        strokePanel(c, x, y, w, h);
+        caps(c, "YOUR SWING", x + 56, y + 72, 26f, LIME);
+
+        float tm = model == null ? 0.5f : Math.max(0f, Math.min(1f, model.timingMeter));
+        String timing = model == null ? "" : model.getTimingLabel();
+
+        // timing copy
+        if (!model.resultSub.isEmpty()) {
+            text(c, model.resultSub, x + 56, y + 140, med, 30f, WILLOW);
+        } else if (model.lastBowled) {
+            text(c, "The ball sneaked under the bat and hit the stumps.", x + 56, y + 140, med, 28f, WILLOW);
+        } else if (model.lastWicket) {
+            text(c, "Caught in the forward field.", x + 56, y + 140, med, 30f, WILLOW);
+        } else {
+            text(c, "Ball passed safely outside the bat.", x + 56, y + 140, med, 30f, WILLOW);
+        }
+
+        // early / perfect / late meter: 212 + 140 + 212 = 564 px wide, 20 px tall
+        float my = y + 307; // Figma y560 within the panel
+        float mx = x + 56;
+        p.setColor(MUTED);
+        r.set(mx, my, mx + 212, my + 20);
+        c.drawRoundRect(r, 10f, 10f, p);
+        p.setColor(LIME);
+        r.set(mx + 212, my, mx + 352, my + 20);
+        c.drawRoundRect(r, 10f, 10f, p);
+        p.setColor(MUTED);
+        r.set(mx + 352, my, mx + 564, my + 20);
+        c.drawRoundRect(r, 10f, 10f, p);
+        caps(c, "EARLY", mx, my + 64, 22f, MUTED);
+        textCenter(c, "PERFECT", mx + 282, my + 64, semi, 22f, LIME);
+        textRight(c, "LATE", mx + 564, my + 64, semi, 22f, MUTED);
+
+        // the marker: 6 x 48, positioned on the meter
+        float px = mx + 8 + tm * 548;
+        p.setColor(WILLOW);
+        c.drawRect(px, my - 14, px + 6, my + 34, p);
+
+        text(c, timing.isEmpty() ? "SWING TIMING" : timing.toUpperCase(Locale.ROOT),
+                x + 56, y + 470, semi, 28f, timing.isEmpty() || timing.equals("PERFECT") ? LIME : WILLOW);
+        text(c, "Bat line " + (model == null ? "0°" : Math.round(model.getBatAngle()) + "°"
+                + "  ·  height " + heightWord(model == null ? 0 : model.getBatHeight())),
+                x + 56, y + 510, reg, 24f, MUTED);
+    }
+
+    private static String heightWord(float h) {
+        if (h < -0.33f) {
+            return "LOW";
+        }
+        return h > 0.33f ? "HIGH" : "MID";
+    }
+
+    // =====================================================================
+    // Innings complete (Figma frame 11)
+    // =====================================================================
+    private void drawInnings(Canvas c) {
+        p.setColor(SCRIM);
+        c.drawRect(0, 0, 1920, 1080, p);
+
+        caps(c, "INNINGS COMPLETE", 104, 200, 26f, LIME);
+        text(c, "That's a wrap.", 104, 290, bold, 76f, WILLOW);
+        text(c, "YOU " + model.scoreText(), 104, 400, bold, 90f, LIME);
+        text(c, "OVERS " + model.oversText() + "  ·  RUN RATE " + String.format(Locale.US, "%.1f", model.runRate()),
+                104, 448, reg, 26f, MUTED);
+
+        // stat cards: FOURS / SIXES / LONGEST SHOT
+        String[] labels = {"FOURS", "SIXES", "LONGEST SHOT"};
+        int[] vals = {model.fours(), model.sixes(), model.longest()};
+        String[] units = {"", "", " m"};
+        for (int i = 0; i < 3; i++) {
+            float x = 104 + i * 292;
+            panel(c, x, 500, 268, 150, PANEL_A);
+            strokePanel(c, x, 500, 268, 150);
+            caps(c, labels[i], x + 32, 548, 22f, MUTED);
+            text(c, String.valueOf(vals[i]) + units[i], x + 32, 612, bold, 52f, WILLOW);
+        }
+
+        // ball-by-ball log: one row per over
+        caps(c, "YOUR INNINGS, BALL BY BALL", 104, 730, 26f, LIME);
+        for (int ov = 0; ov < BoundaryModel.MAX_OVERS; ov++) {
+            int start = ov * 6;
+            int end = Math.min(start + 6, model.ballLog.size());
+            float y = 780 + ov * 62;
+            text(c, "OVER " + (ov + 1) + " · " + BoundaryModel.OVER_NAMES[ov]
+                    + "  ·  " + model.overRuns(ov) + " RUNS", 104, y + 22, semi, 24f, MUTED);
+            for (int b = start; b < end; b++) {
+                float cx = 620 + (b - start) * 86;
+                String v = model.ballLog.get(b);
+                p.setColor(PANEL2);
+                r.set(cx, y, cx + 74, y + 44);
+                c.drawRoundRect(r, 12f, 12f, p);
+                boolean big = "6".equals(v) || "4".equals(v);
+                textCenter(c, v, cx + 37, y + 31, semi, 26f,
+                        "W".equals(v) ? CORAL : (big ? LIME : WILLOW));
+            }
+        }
+
+        pill(c, "Play again", 1600, 953, 370, 66, true, focus == 0);
+        pill(c, "Back to lobby", 1290, 953, 330, 66, false, focus == 1);
+    }
+
+    // =====================================================================
+    // Game paused (Figma frame 12)
+    // =====================================================================
+    private void drawPaused(Canvas c) {
+        p.setColor(0xB3060F0E);
+        c.drawRect(0, 0, 1920, 1080, p);
+
+        float x = 490, y = 204, w = 940, h = 676;
+        panel(c, x, y, w, h, PANEL_A);
+        strokePanel(c, x, y, w, h);
+
+        boolean disconnected = phoneName == null;
+        caps(c, "GAME PAUSED", x + 72, y + 92, 26f, CORAL);
+        text(c, disconnected ? "Your bat disconnected." : "Game paused.",
+                x + 72, y + 158, bold, 56f, WILLOW);
+
+        if (disconnected) {
+            text(c, "1.  Check that Wi-Fi is on, on your phone.", x + 96, y + 250, reg, 28f, MUTED);
+            text(c, "2.  Reopen the Boundary companion app and it will", x + 96, y + 300, reg, 28f, MUTED);
+            text(c, "     reconnect to this TV automatically.", x + 96, y + 344, reg, 28f, MUTED);
+        } else {
+            text(c, "The delivery in progress was not counted.", x + 96, y + 250, reg, 28f, MUTED);
+        }
+
+        // waiting pill with pulse
+        float pulse = 0.55f + 0.45f * (0.5f + 0.5f * (float) Math.sin(clockMs / 450.0));
+        p.setColor(PANEL2);
+        r.set(x + 72, y + 400, x + 72 + 520, y + 400 + 76);
+        c.drawRoundRect(r, 38f, 38f, p);
+        p.setColor(LIME);
+        p.setAlpha((int) (255 * pulse));
+        c.drawCircle(x + 116, y + 438, 12f, p);
+        p.setAlpha(255);
+        text(c, disconnected ? "WAITING FOR YOUR PHONE" : "READY TO RESUME", x + 148, y + 448, semi, 26f, WILLOW);
+        text(c, "Play resumes only after you confirm on your phone.", x + 72, y + 528, reg, 24f, MUTED);
+
+        if (disconnected) {
+            pill(c, "Back to lobby", x + w / 2f, y + 590, 460, 66, false, focus == 0);
+        } else {
+            pill(c, "Resume innings", x + w / 2f - 120, y + 590, 460, 66, true, focus == 0);
+            pill(c, "Back to lobby", x + w / 2f + 220, y + 590, 400, 66, false, focus == 1);
+        }
+    }
+
+    // =====================================================================
+    // 2D fallback scene (only when OpenGL is unavailable)
+    // =====================================================================
+    private void draw2DScene(Canvas c) {
+        // dusk ground + pitch trapezoid
+        p.setColor(0xFF0B2A1E);
+        c.drawRect(0, 0, 1920, 1080, p);
+        p.setColor(0xFF0F3A28);
+        c.drawRect(0, 540, 1920, 1080, p);
+
+        // pitch
+        path.reset();
+        path.moveTo(860, 540);
+        path.lineTo(1060, 540);
+        path.lineTo(1520, 1010);
+        path.lineTo(400, 1010);
+        path.close();
+        p.setColor(0xFFC2A568);
+        c.drawPath(path, p);
+        p.setColor(0x66FFFFFF);
+        c.drawRect(430, 940, 1490, 952, p);
+
+        if (model == null) {
             return;
         }
-        BoundaryModel m = model;
-        drawTopBar(canvas, m, w, h);
-        drawBottomBar(canvas, m, w, h);
-        BoundaryModel.Phase phase = m.getPhase();
-        if (phase == BoundaryModel.Phase.LOBBY) {
-            drawLobby(canvas, w, h);
-        } else {
-            if (field2D) {
-                drawField2D(canvas, m, w, h);
-            }
-            if (phase == BoundaryModel.Phase.BOWLING || phase == BoundaryModel.Phase.RUNUP) {
-                drawDeliveryTag(canvas, m, w, h);
-            }
-            if (phase == BoundaryModel.Phase.FLYING) {
-                drawContactRing(canvas, m, w, h);
-            }
-            if (phase == BoundaryModel.Phase.RESULT) {
-                drawResult(canvas, m, w, h);
-            }
-            if (phase == BoundaryModel.Phase.GAME_OVER) {
-                drawGameOver(canvas, m, w, h);
-            }
-            if (everConnected && !phoneConnected) {
-                drawPaused(canvas, m, w, h);
-            }
-        }
-        if (serverError.length() > 0) {
-            centerText(canvas, red, 30, "Remote server failed: " + serverError, w / 2f, h - 60);
-        }
-    }
+        // bowler (simple, far end)
+        float bz = proj(BoundaryModel.RELEASE_Z * 0.35f);
+        drawStickFigure(c, 960 + 40, 560, 30, 0xFFD33B40);
+        // batsman (near, right-handed)
+        drawStickFigure(c, 1040 - model.batWorldX() * 60, 950, 120, 0xFF2F6FB5);
+        // bat blade angled by line + height
+        float batX = 1040 - model.batWorldX() * 60;
+        float batY = 950 - (model.batWorldY() - 0.74f) * 160;
+        p.setStrokeWidth(16);
+        p.setColor(0xFFF6F8EE);
+        float ang = (float) Math.toRadians(90 - model.getBatAngle());
+        c.drawLine(batX, batY, batX + (float) Math.cos(ang) * 130,
+                batY - (float) Math.sin(ang) * 130, p);
 
-    private void drawTopBar(Canvas canvas, BoundaryModel m, int w, int h) {
-        canvas.drawRect(0, 0, w, 100, panel);
-        text(canvas, white, 44, "BOUNDARY", 40, 66);
-        text(canvas, lime, 22, "CRICKET. IN YOUR HANDS.", 40, 92);
-        centerText(canvas, muted, 20, "YOU", w / 2f, 34);
-        centerText(canvas, white, 52, m.scoreText(), w / 2f, 86);
-        centerText(canvas, muted, 20, "OVERS", w / 2f + 190, 34);
-        centerText(canvas, white, 40, m.oversText(), w / 2f + 190, 86);
-        String conn = everConnected ? (phoneConnected ? "PHONE CONNECTED" : "PHONE DISCONNECTED") : "WAITING FOR PHONE";
-        Paint cp = phoneConnected || !everConnected ? lime : red;
-        float tw = cp.measureText(conn);
-        text(canvas, cp, 24, conn, w - tw - 180, 66);
-        text(canvas, muted, 22, "QUICK PLAY / " + BoundaryModel.MAX_OVERS + " OVERS", 220, 66);
-        text(canvas, muted, 22, "Pause", w - 120, 66);
-    }
-
-    private void drawBottomBar(Canvas canvas, BoundaryModel m, int w, int h) {
-        int ballNo = m.getBalls() + 1;
-        String phaseLabel;
-        String hint;
-        switch (m.getPhase()) {
-            case RUNUP:
-            case BOWLING:
-                phaseLabel = "BALL IN PLAY";
-                hint = "WATCH THE BALL — angle the bat to meet it. It fires on contact.";
-                break;
-            case FLYING:
-                phaseLabel = "SHOT IN FLIGHT";
-                hint = "Follow the ball into the gap.";
-                break;
-            case RESULT:
-                phaseLabel = "DELIVERY " + ballNo;
-                hint = "Reset your stance. Your next ball is waiting.";
-                break;
-            default:
-                phaseLabel = "QUICK PLAY";
-                hint = "";
+        BoundaryModel.Phase ph = model.getPhase();
+        if (ph == BoundaryModel.Phase.BOWLING || ph == BoundaryModel.Phase.BOWLED) {
+            float prog = Math.max(0f, Math.min(1.15f, model.deliveryProgress()));
+            float wx = model.ballWorldX(Math.min(1f, prog));
+            float wy = model.ballWorldY(Math.min(1f, prog));
+            float wz = model.ballWorldZ(Math.min(1f, prog));
+            float d = 3.6f - wz;
+            float s = 760f / d;
+            float sx = 960 + wx * s + 80 * (1 - s / 211f) * 0;
+            float sy = 540 + (1.65f - wy) * s;
+            // shadow
+            p.setColor(0x40000000);
+            c.drawOval(sx - 14, 540 + 1.65f * s - 6, sx + 14, 540 + 1.65f * s + 6, p);
+            // ball
+            p.setColor(BALLRED);
+            c.drawCircle(sx, sy, 12, p);
         }
-        text(canvas, white, 34, String.format("%02d", Math.min(ballNo, BoundaryModel.MAX_BALLS)), 40, h - 90);
-        text(canvas, muted, 20, m.getOverLabel(), 110, h - 90);
-        text(canvas, lime, 22, phaseLabel, 40, h - 56);
-        text(canvas, muted, 26, hint, 40, h - 22);
-        List<String> last = m.getLastBalls(3);
-        float x = w - 60 - last.size() * 64;
-        text(canvas, lime, 20, "LAST 3 BALLS", w - 260, h - 110);
-        for (String s : last) {
-            ringPaint.setColor(s.equals("W") ? 0xFFFF895E : 0xFFD7FF67);
-            canvas.drawCircle(x + 24, h - 62, 26, ringPaint);
-            centerText(canvas, s.equals("W") ? red : white, 26, s, x + 24, h - 52);
-            x += 64;
+        if (ph == BoundaryModel.Phase.FLYING) {
+            float q = Math.max(0f, Math.min(1f, model.flyT));
+            float fx = 960 + model.flyX * 90;
+            float fy = 700 - model.flyY * 260 - q * 380;
+            p.setColor(BALLRED);
+            c.drawCircle(fx, Math.max(40, fy), 14, p);
         }
     }
 
-    private void drawLobby(Canvas canvas, int w, int h) {
-        Paint overlay = new Paint();
-        overlay.setColor(0xB3060F0E);
-        canvas.drawRect(0, 100, w, h, overlay);
-        text(canvas, white, 64, "Your phone. Your bat. Your big moment.", 80, 300);
-        text(canvas, muted, 30, "Step up to the crease. Tilt your phone to angle the bat — it fires when the bat meets the ball.", 80, 350);
-        text(canvas, white, 54, BoundaryModel.MAX_OVERS + " OVERS", 80, 470);
-        text(canvas, muted, 28, BoundaryModel.MAX_BALLS + " balls. Five overs, five bowling phases: pace, spin, swing, bounce, death. Make every swing count.", 80, 512);
-        text(canvas, muted, 26, "Keep a clear space around you. Hold your phone securely.", 80, h - 40);
-        text(canvas, lime, 24, "HOW TO PLAY", w - 260, h - 40);
-
-        float rx = w * 0.56f;
-        text(canvas, lime, 26, "01 / CONNECT YOUR BAT", rx, 240);
-        text(canvas, white, 46, "The next innings starts here.", rx, 300);
-        text(canvas, muted, 28, "Open the Boundary companion on your phone and enter the TV code below.", rx, 344);
-        centerText(canvas, white, 90, pairingCode, rx + 260, 500);
-        centerText(canvas, muted, 22, "PAIRING CODE", rx + 260, 540);
-        String status = everConnected ? (phoneConnected ? "Phone connected — start your innings" : "Waiting for your phone...") : "Waiting for your phone...";
-        centerText(canvas, lime, 28, status, rx + 260, 600);
-        centerText(canvas, muted, 24, "Same Wi-Fi network • Fire TV • " + ipText, rx + 260, 640);
+    private float proj(float z) {
+        return 540 + (z + 20f) * 12f;
     }
 
-    private void drawDeliveryTag(Canvas canvas, BoundaryModel m, int w, int h) {
-        float x = w / 2f + 260;
-        float y = h * 0.30f;
-        // v2.5: the over's bowling phase (PACE / SPIN / SWING / BOUNCE / DEATH)
-        text(canvas, lime, 24, m.getOverLabel(), x, y - 40);
-        text(canvas, muted, 20, m.getOverHint(), x, y - 14);
-        text(canvas, lime, 30, m.getDelivery(), x, y + 28);
-        text(canvas, muted, 24, m.getDeliveryHint(), x, y + 60);
-        centerText(canvas, lime, 34, "SWING NOW", w / 2f, h * 0.22f);
-    }
-
-    private void drawContactRing(Canvas canvas, BoundaryModel m, int w, int h) {
-        float cx = w / 2f, cy = h * 0.42f;
-        ringPaint.setColor("PERFECT".equals(m.getTimingLabel()) ? 0xFFD7FF67 : "GOOD".equals(m.getTimingLabel()) ? 0xFFFFD740 : 0xFFFF895E);
-        canvas.drawCircle(cx, cy, 60, ringPaint);
-        Paint ball = new Paint(Paint.ANTI_ALIAS_FLAG);
-        ball.setColor(0xFFF15D4D);
-        canvas.drawCircle(cx, cy, 18, ball);
-        centerText(canvas, "PERFECT".equals(m.getTimingLabel()) ? lime : white, 40, m.getTimingLabel(), cx, cy + 120);
-        centerText(canvas, muted, 26, "Clean contact - into the gap.", cx, cy + 156);
-    }
-
-    private void drawResult(Canvas canvas, BoundaryModel m, int w, int h) {
-        canvas.drawRect(w * 0.30f, h * 0.16f, w * 0.98f, h * 0.94f, panelLight);
-        text(canvas, lime, 24, "SHOT BREAKDOWN", w * 0.33f, h * 0.24f);
-        text(canvas, white, 64, m.resultTitle, w * 0.33f, h * 0.33f);
-        text(canvas, muted, 28, m.resultSub, w * 0.33f, h * 0.38f);
-        text(canvas, white, 44, m.scoreText(), w * 0.33f, h * 0.47f);
-        text(canvas, muted, 26, m.oversText() + " overs / " + (BoundaryModel.MAX_BALLS - m.getBalls()) + " balls remaining", w * 0.33f, h * 0.52f);
-        text(canvas, lime, 24, "TIMING", w * 0.33f, h * 0.60f);
-        centerText(canvas, "PERFECT".equals(m.getTimingLabel()) ? lime : white, 34, m.getTimingLabel(), w * 0.42f, h * 0.66f);
-        float bx = w * 0.55f, by = h * 0.60f, bw = w * 0.38f;
-        Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
-        bar.setColor(0xFF4C4230);
-        canvas.drawRect(bx, by, bx + bw, by + 26, bar);
-        bar.setColor(0xFFD7FF67);
-        canvas.drawRect(bx + bw * 0.35f, by, bx + bw * 0.65f, by + 26, bar);
-        text(canvas, muted, 20, "EARLY", bx, by + 52);
-        text(canvas, muted, 20, "PERFECT", bx + bw * 0.45f, by + 52);
-        text(canvas, muted, 20, "LATE", bx + bw - 40, by + 52);
-        if (!m.lastWicket && m.lastRuns > 0) {
-            text(canvas, muted, 26, "Distance: " + m.distM + " m", w * 0.55f, h * 0.72f);
-            text(canvas, muted, 26, "Direction: " + m.dirDeg + "° · forward", w * 0.55f, h * 0.77f);
-            text(canvas, muted, 26, "Forward hitting zone: 120° arc · find the open field", w * 0.55f, h * 0.82f);
-        } else if (m.lastWicket) {
-            text(canvas, muted, 26, "Caught in the forward field", w * 0.55f, h * 0.72f);
-            text(canvas, red, 26, "0 runs - 1 wicket added", w * 0.55f, h * 0.77f);
-        } else {
-            text(canvas, muted, 26, "Ball passed safely outside the bat", w * 0.55f, h * 0.72f);
-            text(canvas, white, 26, "0 runs - No wicket", w * 0.55f, h * 0.77f);
-        }
-        Paint pill = new Paint(Paint.ANTI_ALIAS_FLAG);
-        pill.setColor(0xFFD7FF67);
-        canvas.drawRoundRect(w * 0.82f, h * 0.86f, w * 0.97f, h * 0.92f, 24, 24, pill);
-        Paint dark = new Paint();
-        dark.setColor(0xFF060F0E);
-        dark.setAntiAlias(true);
-        centerText(canvas, dark, 26, "Next delivery", w * 0.895f, h * 0.898f);
-    }
-
-    private void drawGameOver(Canvas canvas, BoundaryModel m, int w, int h) {
-        Paint overlay = new Paint();
-        overlay.setColor(0xD9060F0E);
-        canvas.drawRect(0, 100, w, h, overlay);
-        centerText(canvas, white, 72, "That's a wrap.", w / 2f, 260);
-        text(canvas, lime, 26, "INNINGS COMPLETE", 80, 330);
-        text(canvas, white, 110, m.scoreText(), 80, 460);
-        text(canvas, muted, 28, m.getBalls() + " balls played. " + BoundaryModel.MAX_OVERS + " overs complete.", 80, 510);
-        text(canvas, lime, 26, "STATS", 80, 590);
-        text(canvas, white, 34, "Fours: " + m.fours() + "    Sixes: " + m.sixes() + "    Longest shot: " + m.longest() + " m", 80, 636);
-        text(canvas, lime, 26, "YOUR INNINGS, OVER BY OVER", 80, 692);
-        String[] oversLog = m.ballByBall().split("   ");
-        float ly = 728;
-        for (String s : oversLog) {
-            text(canvas, white, 24, s, 80, ly);
-            ly += 34;
-        }
-        text(canvas, muted, 22, (m.fours() * 4 + m.sixes() * 6) + " runs from boundaries", 80, 902);
-        Paint pill = new Paint(Paint.ANTI_ALIAS_FLAG);
-        pill.setColor(0xFFD7FF67);
-        canvas.drawRoundRect(w - 560, h - 110, w - 340, h - 50, 24, 24, pill);
-        Paint dark = new Paint();
-        dark.setColor(0xFF060F0E);
-        dark.setAntiAlias(true);
-        centerText(canvas, dark, 28, "Play again", w - 450, h - 68);
-        pill.setColor(0xFF132D25);
-        canvas.drawRoundRect(w - 300, h - 110, w - 80, h - 50, 24, 24, pill);
-        centerText(canvas, white, 28, "Back to lobby", w - 190, h - 68);
-    }
-
-    private void drawPaused(Canvas canvas, BoundaryModel m, int w, int h) {
-        Paint overlay = new Paint();
-        overlay.setColor(0xCC060F0E);
-        canvas.drawRect(0, 0, w, h, overlay);
-        centerText(canvas, red, 64, "GAME PAUSED", w / 2f, h * 0.34f);
-        centerText(canvas, white, 34, "Your bat disconnected.", w / 2f, h * 0.42f);
-        centerText(canvas, muted, 26, "Your score is safe. No delivery will start until your phone is connected and you're ready.", w / 2f, h * 0.48f);
-        centerText(canvas, muted, 24, "01  Keep the companion app open on your phone.", w / 2f, h * 0.56f);
-        centerText(canvas, muted, 24, "02  Check both devices are on the same Wi-Fi.", w / 2f, h * 0.61f);
-        centerText(canvas, lime, 30, "WAITING FOR YOUR PHONE", w / 2f, h * 0.72f);
-        centerText(canvas, white, 26, m.scoreText() + "  -  " + m.oversText() + " overs  -  delivery not counted", w / 2f, h * 0.78f);
-    }
-
-    // ---- 2D fallback field: replicates the 3D visual (stadium backdrop + perspective pitch) ----
-    private android.graphics.Bitmap bg3d;
-
-    private void drawField2D(Canvas canvas, BoundaryModel m, int w, int h) {
-        if (bg3d == null) {
-            bg3d = android.graphics.BitmapFactory.decodeResource(getResources(), R.drawable.bg_3d);
-        }
-        if (bg3d != null) {
-            canvas.drawBitmap(bg3d, null, new android.graphics.Rect(0, 0, w, h), null);
-        } else {
-            canvas.drawColor(0xFF0A1F14);
-        }
-        android.graphics.Paint vg = new android.graphics.Paint();
-        android.graphics.RadialGradient rg = new android.graphics.RadialGradient(
-                w / 2f, h * 0.55f, h * 0.95f,
-                new int[]{0x00000000, 0x55000000}, null, android.graphics.Shader.TileMode.CLAMP);
-        vg.setShader(rg);
-        canvas.drawRect(0, 0, w, h, vg);
-        android.graphics.Paint top = new android.graphics.Paint();
-        top.setColor(0x66060F0E);
-        canvas.drawRect(0, 0, w, 110, top);
-
-        float farY = h * 0.50f, nearY = h * 0.88f;
-        android.graphics.Paint pitch = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        pitch.setColor(0xFFC9A96F);
-        android.graphics.Path p = new android.graphics.Path();
-        p.moveTo(w * 0.30f, farY);
-        p.lineTo(w * 0.72f, farY);
-        p.lineTo(w * 0.88f, nearY);
-        p.lineTo(w * 0.14f, nearY);
-        p.close();
-        canvas.drawPath(p, pitch);
-        for (int i = 0; i < 6; i++) {
-            float t0 = i / 6f, t1 = (i + 1) / 6f;
-            pitch.setColor(i % 2 == 0 ? 0xFFC9A96F : 0xFFB99A63);
-            android.graphics.Path b = new android.graphics.Path();
-            b.moveTo(w * (0.30f + 0.42f * t0), farY);
-            b.lineTo(w * (0.30f + 0.42f * t1), farY);
-            b.lineTo(w * (0.14f + 0.74f * t1), nearY);
-            b.lineTo(w * (0.14f + 0.74f * t0), nearY);
-            b.close();
-            canvas.drawPath(b, pitch);
-        }
-
-        float bx = w * 0.64f, by = h * 0.88f, s = h / 860f;
-        android.graphics.Paint sh = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        sh.setColor(0x55000000);
-        canvas.drawOval(bx - 70 * s, by - 6 * s, bx + 70 * s, by + 10 * s, sh);
-        Paint stump = new Paint(Paint.ANTI_ALIAS_FLAG);
-        stump.setColor(0xFFFFF3D2);
-        stump.setStrokeWidth(7 * s);
-        for (int i = -1; i <= 1; i++) {
-            canvas.drawLine(bx - 46 * s + i * 12 * s, by - 46 * s, bx - 46 * s + i * 12 * s, by, stump);
-        }
-        Paint kit = new Paint(Paint.ANTI_ALIAS_FLAG);
-        kit.setStrokeCap(Paint.Cap.ROUND);
-        kit.setColor(0xFFF2F2F2);
-        kit.setStrokeWidth(16 * s);
-        canvas.drawLine(bx - 14 * s, by - 120 * s, bx - 22 * s, by - 8 * s, kit);
-        canvas.drawLine(bx + 14 * s, by - 120 * s, bx + 26 * s, by - 8 * s, kit);
-        kit.setColor(0xFF1E5AA8);
-        kit.setStrokeWidth(34 * s);
-        canvas.drawLine(bx, by - 210 * s, bx, by - 118 * s, kit);
-        kit.setColor(0xFFFF7A1A);
-        kit.setStrokeWidth(8 * s);
-        canvas.drawLine(bx + 14 * s, by - 205 * s, bx + 14 * s, by - 125 * s, kit);
-        kit.setColor(0xFF1E5AA8);
-        kit.setStrokeWidth(12 * s);
-        canvas.drawLine(bx - 12 * s, by - 195 * s, bx - 34 * s, by - 160 * s, kit);
-        canvas.drawLine(bx + 12 * s, by - 195 * s, bx + 36 * s, by - 168 * s, kit);
-        kit.setColor(0xFFFFF3D2);
-        canvas.drawCircle(bx + 36 * s, by - 168 * s, 9 * s, kit);
-        kit.setColor(0xFF2E6BD6);
-        canvas.drawCircle(bx, by - 232 * s, 20 * s, kit);
-        kit.setColor(0xFF0F2E5C);
-        canvas.drawRect(bx - 20 * s, by - 232 * s, bx + 20 * s, by - 224 * s, kit);
-        // bat: keyframed 3D swing path (backlift → downswing → contact → follow-through)
-        // projected to 2D — yaw sweeps in-plane, elevation raises the tip, roll shortens it
-        float sw = m.getSwing();
-        float dir = m.getSwingDir();
-        float hx = bx + 30 * s, hy = by - 170 * s;
-        float swT = 1f - sw;
-        float idleBob = sw <= 0 ? 3f * (float) Math.sin(SystemClock.elapsedRealtime() / 400.0) : 0f;
-        for (int k = 4; k >= 0; k--) {
-            if (k > 0 && sw <= 0) break;
-            float tk = Math.max(0f, swT - k * 0.07f);
-            float[] pose = swingPose2D(tk);
-            float yawDeg = 35 + m.getBatAngle() * 0.9f * pose[3] + pose[0] * dir;
-            float elev = (float) Math.toRadians(pose[1] + (k == 0 ? idleBob : 0f));
-            float roll = (float) Math.toRadians(pose[2]);
-            int alpha = k == 0 ? 255 : (int) (100 - k * 22);
-            drawBat2D(canvas, hx, hy, yawDeg, elev, roll, s, alpha);
-        }
-
-        if (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING) {
-            // v2.6: bowler drawn bigger and closer so he reads clearly
-            float runT = m.getPhase() == BoundaryModel.Phase.RUNUP ? 0.35f : 1f;
-            float px = w * (0.74f - runT * 0.06f), py = h * (0.48f + runT * 0.05f), ps = h / 860f * 0.85f;
-            Paint bw = new Paint(Paint.ANTI_ALIAS_FLAG);
-            bw.setStrokeCap(Paint.Cap.ROUND);
-            bw.setColor(0xFFD33B40);
-            bw.setStrokeWidth(10 * ps);
-            canvas.drawLine(px, py - 60 * ps, px, py, bw);
-            bw.setStrokeWidth(7 * ps);
-            canvas.drawLine(px - 6 * ps, py - 30 * ps, px - 16 * ps, py, bw);
-            canvas.drawLine(px + 6 * ps, py - 30 * ps, px + 16 * ps, py, bw);
-            canvas.drawCircle(px, py - 72 * ps, 9 * ps, bw);
-        }
-
-        if (m.isBallLive() || m.getPhase() == BoundaryModel.Phase.FLYING) {
-            float t = m.getPhase() == BoundaryModel.Phase.FLYING ? 1f
-                    : Math.max(0f, Math.min(1f, (m.ballY - 90f) / Math.max(1f, m.batLineY() - 90f)));
-            float sx = w * (0.51f + (m.getPhase() == BoundaryModel.Phase.FLYING ? (m.hitX - 960f) / 960f * 0.3f : (m.ballX - 960f) / 960f * 0.3f));
-            float sy = h * (0.52f + t * 0.34f) + (m.getPhase() == BoundaryModel.Phase.FLYING ? (m.hitY / 1080f) * h * 0.2f : 0f);
-            // 3D delivery: parabolic descent from the bowler's hand, sharp
-            // velocity-flip bounce with length-dependent rise (matches the GL scene)
-            float airUp = 0f;
-            if (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING) {
-                airUp = Math.max(0f, ballWorldHeight2D(m) - 0.16f) * h * 0.052f;
-                sy -= airUp;
-            }
-            float br = (10 + t * 18);
-            float shScale = Math.max(0.45f, 1f - airUp / (h * 0.098f) * 0.5f);
-            sh.setColor(0x44000000);
-            canvas.drawOval(sx - br * shScale, sy + airUp + br * 0.7f, sx + br * shScale, sy + airUp + br * 1.05f, sh);
-            Paint ball = new Paint(Paint.ANTI_ALIAS_FLAG);
-            ball.setColor(0xFFD33B40);
-            canvas.drawCircle(sx, sy, br, ball);
-            Paint seam = new Paint(Paint.ANTI_ALIAS_FLAG);
-            seam.setColor(0xFFFFF3D2);
-            seam.setStrokeWidth(Math.max(2, br * 0.22f));
-            canvas.drawLine(sx - br * 0.6f, sy - br * 0.6f, sx + br * 0.6f, sy + br * 0.6f, seam);
-        }
-    }
-
-    // ---- 2D fallback bat: proper shape (cane handle + grip, willow blade with spine) ----
-
-    /**
-     * Draws the bat as a real bat shape in the 2D fallback field: the canvas is
-     * rotated to the swing yaw, elevation shortens the blade and lifts the tip,
-     * and the blade is a rounded willow face with a darker spine and edge stripe.
-     */
-    private void drawBat2D(Canvas canvas, float hx, float hy, float yawDeg,
-                           float elevRad, float rollRad, float s, int alpha) {
-        float foreshorten = Math.max(0.35f, (float) Math.cos(elevRad));
-        float lift = (float) Math.sin(elevRad) * 135f * s;
-        canvas.save();
-        canvas.translate(hx, hy - lift);
-        canvas.rotate(-yawDeg);
-        float handleLen = 36f * s;
-        float bladeLen = 105f * s * foreshorten;
-        float edge = 0.55f + 0.45f * (float) Math.cos(rollRad);
-        Paint seg = new Paint(Paint.ANTI_ALIAS_FLAG);
-        seg.setStrokeCap(Paint.Cap.ROUND);
-        // cane handle
-        seg.setColor(0xFF3A2413);
-        seg.setAlpha(alpha);
-        seg.setStrokeWidth(9f * s * edge);
-        canvas.drawLine(0, 12f * s, 0, -handleLen + 6f * s, seg);
-        // rubber grip at the bottom of the handle
-        seg.setColor(0xFF524C58);
-        seg.setStrokeWidth(11f * s * edge);
-        canvas.drawLine(0, 12f * s, 0, -12f * s, seg);
-        // willow blade: rounded face with a tapered toe
-        android.graphics.Paint face = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        face.setColor(0xFFF5D9A8);
-        face.setAlpha(alpha);
-        android.graphics.RectF blade = new android.graphics.RectF(
-                -13f * s * edge, -bladeLen - handleLen + 6f * s,
-                13f * s * edge, -handleLen + 10f * s);
-        canvas.drawRoundRect(blade, 11f * s * edge, 11f * s * edge, face);
-        // spine stripe down the back of the blade
-        android.graphics.Paint spine = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        spine.setColor(0xFFC9A876);
-        spine.setAlpha(alpha);
-        android.graphics.RectF spineR = new android.graphics.RectF(
-                -6f * s * edge, -bladeLen - handleLen + 14f * s,
-                3f * s * edge, -handleLen + 12f * s);
-        canvas.drawRoundRect(spineR, 5f * s * edge, 5f * s * edge, spine);
-        canvas.restore();
-    }
-
-    // ---- shared 3D motion model (mirrors GlSceneView so both renderers agree) ----
-
-    /** Keyframed swing pose at t∈[0,1]: {yawOff°, elevation°, roll°, batAngleWeight}.
-     *  v2.6: short biomechanical arc — backlift toward the slips (−30°), face
-     *  squared to the commanded angle at contact, controlled ~45° wrap. Never a
-     *  full rotation. */
-    static float[] swingPose2D(float t) {
-        float yawOff, elev, roll, w;
-        if (t <= 0.5f) {
-            float x = smoothF(t / 0.5f);
-            yawOff = lerpF(-30f, 0f, x);
-            elev = lerpF(42f, 0f, x);
-            roll = lerpF(24f, 0f, x);
-            w = lerpF(0.85f, 1.00f, x);
-        } else {
-            float x = smoothF((t - 0.5f) / 0.5f);
-            yawOff = lerpF(0f, 45f, x);
-            elev = lerpF(0f, 30f, x);
-            roll = lerpF(0f, -16f, x);
-            w = lerpF(1.00f, 1.05f, x);
-        }
-        return new float[]{yawOff, elev, roll, w};
-    }
-
-    /**
-     * Ball centre height in world units (ground=0; release ≈ 2.05) for the delivery
-     * progress p∈[0,1]: parabolic descent, then a sharp bounce at the pitch marker
-     * with length-dependent rise; full tosses never pitch.
-     */
-    static float ballWorldHeight2D(BoundaryModel m) {
-        float batLine = m.batLineY();
-        float span = Math.max(1f, batLine - 90f);
-        float p = Math.max(0f, Math.min(1f, (m.ballY - 90f) / span));
-        if ("FULL TOSS".equals(m.getDelivery())) {
-            return 0.16f + (2.05f - 0.16f) * (float) Math.pow(1f - p, 1.15f);
-        }
-        float rem = Math.max(0f, Math.min(1f, (batLine - m.pitchY) / span));
-        if (p <= rem) {
-            float s2 = rem <= 0f ? 1f : Math.max(0f, Math.min(1f, p / rem));
-            float pre = (1f - s2) * (1f - s2) * (1f + 0.55f * s2) + 0.35f * s2 * (1f - s2);
-            return 0.16f + (2.05f - 0.16f) * pre;
-        }
-        float u = Math.max(0f, Math.min(1f, (p - rem) / Math.max(0.02f, 1f - rem)));
-        float peak = 0.16f + 0.22f + 2.25f * (float) Math.pow(rem, 0.95f);
-        float up = 0.40f;
-        float gEnd = 0.25f + 0.75f * Math.min(1f, rem * 2.4f);
-        float g = u <= up
-                ? (float) Math.pow(u / up, 0.72f)
-                : gEnd + (1f - gEnd) * (float) Math.pow((1f - u) / (1f - up), 1.55f);
-        return 0.16f + (peak - 0.16f) * g;
-    }
-
-    private static float lerpF(float a, float b, float x) {
-        return a + (b - a) * x;
-    }
-
-    private static float smoothF(float x) {
-        x = Math.max(0f, Math.min(1f, x));
-        return 0.5f - 0.5f * (float) Math.cos((float) (x * Math.PI));
+    private void drawStickFigure(Canvas c, float x, float y, float h, int col) {
+        p.setStrokeWidth(Math.max(4, h / 12f));
+        p.setColor(col);
+        c.drawLine(x, y - h * 0.45f, x, y, p);                       // body
+        c.drawLine(x - h * 0.16f, y, x + h * 0.16f, y, p);           // legs
+        c.drawLine(x - h * 0.28f, y - h * 0.25f, x + h * 0.28f, y - h * 0.25f, p); // arms
+        p.setColor(0xFFE8B98A);
+        c.drawCircle(x, y - h * 0.58f, h * 0.13f, p);
     }
 }
