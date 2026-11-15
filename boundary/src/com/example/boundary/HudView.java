@@ -136,6 +136,7 @@ public class HudView extends View {
                 hint = "";
         }
         text(canvas, white, 34, String.format("%02d", Math.min(ballNo, BoundaryModel.MAX_BALLS)), 40, h - 90);
+        text(canvas, muted, 20, m.getOverLabel(), 110, h - 90);
         text(canvas, lime, 22, phaseLabel, 40, h - 56);
         text(canvas, muted, 26, hint, 40, h - 22);
         List<String> last = m.getLastBalls(3);
@@ -156,7 +157,7 @@ public class HudView extends View {
         text(canvas, white, 64, "Your phone. Your bat. Your big moment.", 80, 300);
         text(canvas, muted, 30, "Step up to the crease. Tilt your phone to angle the bat — it fires when the bat meets the ball.", 80, 350);
         text(canvas, white, 54, BoundaryModel.MAX_OVERS + " OVERS", 80, 470);
-        text(canvas, muted, 28, BoundaryModel.MAX_BALLS + " balls. Make every swing count.", 80, 512);
+        text(canvas, muted, 28, BoundaryModel.MAX_BALLS + " balls. Five overs, five bowling phases: pace, spin, swing, bounce, death. Make every swing count.", 80, 512);
         text(canvas, muted, 26, "Keep a clear space around you. Hold your phone securely.", 80, h - 40);
         text(canvas, lime, 24, "HOW TO PLAY", w - 260, h - 40);
 
@@ -174,8 +175,11 @@ public class HudView extends View {
     private void drawDeliveryTag(Canvas canvas, BoundaryModel m, int w, int h) {
         float x = w / 2f + 260;
         float y = h * 0.30f;
-        text(canvas, lime, 30, m.getDelivery(), x, y);
-        text(canvas, muted, 24, m.getDeliveryHint(), x, y + 32);
+        // v2.5: the over's bowling phase (PACE / SPIN / SWING / BOUNCE / DEATH)
+        text(canvas, lime, 24, m.getOverLabel(), x, y - 40);
+        text(canvas, muted, 20, m.getOverHint(), x, y - 14);
+        text(canvas, lime, 30, m.getDelivery(), x, y + 28);
+        text(canvas, muted, 24, m.getDeliveryHint(), x, y + 60);
         centerText(canvas, lime, 34, "SWING NOW", w / 2f, h * 0.22f);
     }
 
@@ -238,9 +242,14 @@ public class HudView extends View {
         text(canvas, muted, 28, m.getBalls() + " balls played. " + BoundaryModel.MAX_OVERS + " overs complete.", 80, 510);
         text(canvas, lime, 26, "STATS", 80, 590);
         text(canvas, white, 34, "Fours: " + m.fours() + "    Sixes: " + m.sixes() + "    Longest shot: " + m.longest() + " m", 80, 636);
-        text(canvas, lime, 26, "YOUR INNINGS, BALL BY BALL", 80, 700);
-        text(canvas, white, 30, m.ballByBall(), 80, 744);
-        text(canvas, muted, 26, (m.fours() * 4 + m.sixes() * 6) + " runs from boundaries", 80, 800);
+        text(canvas, lime, 26, "YOUR INNINGS, OVER BY OVER", 80, 692);
+        String[] oversLog = m.ballByBall().split("   ");
+        float ly = 728;
+        for (String s : oversLog) {
+            text(canvas, white, 24, s, 80, ly);
+            ly += 34;
+        }
+        text(canvas, muted, 22, (m.fours() * 4 + m.sixes() * 6) + " runs from boundaries", 80, 902);
         Paint pill = new Paint(Paint.ANTI_ALIAS_FLAG);
         pill.setColor(0xFFD7FF67);
         canvas.drawRoundRect(w - 560, h - 110, w - 340, h - 50, 24, 24, pill);
@@ -347,8 +356,6 @@ public class HudView extends View {
         float sw = m.getSwing();
         float dir = m.getSwingDir();
         float hx = bx + 30 * s, hy = by - 170 * s;
-        Paint bat = new Paint(Paint.ANTI_ALIAS_FLAG);
-        bat.setStrokeCap(Paint.Cap.ROUND);
         float swT = 1f - sw;
         float idleBob = sw <= 0 ? 3f * (float) Math.sin(SystemClock.elapsedRealtime() / 400.0) : 0f;
         for (int k = 4; k >= 0; k--) {
@@ -356,18 +363,10 @@ public class HudView extends View {
             float tk = Math.max(0f, swT - k * 0.07f);
             float[] pose = swingPose2D(tk);
             float yawDeg = 35 + m.getBatAngle() * 0.9f * pose[3] + pose[0] * dir;
-            float ang = (float) Math.toRadians(yawDeg);
             float elev = (float) Math.toRadians(pose[1] + (k == 0 ? idleBob : 0f));
             float roll = (float) Math.toRadians(pose[2]);
-            float len = 150 * s * (float) Math.cos(elev);
-            float ce = (float) Math.cos(elev);
             int alpha = k == 0 ? 255 : (int) (100 - k * 22);
-            bat.setColor(0xFFC08A4E);
-            bat.setAlpha(alpha);
-            bat.setStrokeWidth((k == 0 ? 13f : 11f) * s * (0.55f + 0.45f * (float) Math.cos(roll)));
-            float tx = hx + (float) Math.sin(ang) * len;
-            float ty = hy + (float) Math.cos(ang) * len * 0.6f - (float) Math.sin(elev) * 150 * s * 0.85f;
-            canvas.drawLine(hx, hy, tx, ty, bat);
+            drawBat2D(canvas, hx, hy, yawDeg, elev, roll, s, alpha);
         }
 
         if (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING) {
@@ -408,6 +407,53 @@ public class HudView extends View {
             seam.setStrokeWidth(Math.max(2, br * 0.22f));
             canvas.drawLine(sx - br * 0.6f, sy - br * 0.6f, sx + br * 0.6f, sy + br * 0.6f, seam);
         }
+    }
+
+    // ---- 2D fallback bat: proper shape (cane handle + grip, willow blade with spine) ----
+
+    /**
+     * Draws the bat as a real bat shape in the 2D fallback field: the canvas is
+     * rotated to the swing yaw, elevation shortens the blade and lifts the tip,
+     * and the blade is a rounded willow face with a darker spine and edge stripe.
+     */
+    private void drawBat2D(Canvas canvas, float hx, float hy, float yawDeg,
+                           float elevRad, float rollRad, float s, int alpha) {
+        float foreshorten = Math.max(0.35f, (float) Math.cos(elevRad));
+        float lift = (float) Math.sin(elevRad) * 135f * s;
+        canvas.save();
+        canvas.translate(hx, hy - lift);
+        canvas.rotate(-yawDeg);
+        float handleLen = 36f * s;
+        float bladeLen = 105f * s * foreshorten;
+        float edge = 0.55f + 0.45f * (float) Math.cos(rollRad);
+        Paint seg = new Paint(Paint.ANTI_ALIAS_FLAG);
+        seg.setStrokeCap(Paint.Cap.ROUND);
+        // cane handle
+        seg.setColor(0xFF3A2413);
+        seg.setAlpha(alpha);
+        seg.setStrokeWidth(9f * s * edge);
+        canvas.drawLine(0, 12f * s, 0, -handleLen + 6f * s, seg);
+        // rubber grip at the bottom of the handle
+        seg.setColor(0xFF524C58);
+        seg.setStrokeWidth(11f * s * edge);
+        canvas.drawLine(0, 12f * s, 0, -12f * s, seg);
+        // willow blade: rounded face with a tapered toe
+        android.graphics.Paint face = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        face.setColor(0xFFF5D9A8);
+        face.setAlpha(alpha);
+        android.graphics.RectF blade = new android.graphics.RectF(
+                -13f * s * edge, -bladeLen - handleLen + 6f * s,
+                13f * s * edge, -handleLen + 10f * s);
+        canvas.drawRoundRect(blade, 11f * s * edge, 11f * s * edge, face);
+        // spine stripe down the back of the blade
+        android.graphics.Paint spine = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        spine.setColor(0xFFC9A876);
+        spine.setAlpha(alpha);
+        android.graphics.RectF spineR = new android.graphics.RectF(
+                -6f * s * edge, -bladeLen - handleLen + 14f * s,
+                3f * s * edge, -handleLen + 12f * s);
+        canvas.drawRoundRect(spineR, 5f * s * edge, 5f * s * edge, spine);
+        canvas.restore();
     }
 
     // ---- shared 3D motion model (mirrors GlSceneView so both renderers agree) ----
