@@ -8,16 +8,41 @@ public class BoundaryModel {
 
     public enum Phase {LOBBY, RUNUP, BOWLING, FLYING, RESULT, GAME_OVER}
 
-    public static final int MAX_BALLS = 12;      // QUICK PLAY = 2 overs
-    public static final int MAX_OVERS = 2;
+    // v2.5: five overs, and every over is a distinct bowling phase
+    public static final int MAX_BALLS = 30;      // 5 overs x 6 balls
+    public static final int MAX_OVERS = 5;
     public static final int MAX_WICKETS = 3;
     private static final float BAT_LINE_RATIO = 0.84f;
     private static final float PITCH_TOP = 0.42f;
     private static final float PITCH_BOT = 0.74f;
     private static final float ANGLE_LIMIT = 60f;   // 120° forward hitting zone
-    private static final float ANGLE_TOL = 18f;     // bat-vs-ball angle tolerance (deg)
-    private static final float TRAVEL_MS = 1500f;   // release -> bat travel time
+    private static final float ANGLE_TOL = 30f;     // v2.5: widened 18 -> 30, ball meets the bat easily
     private static final float WOBBLE = 0.03f;      // small line wobble (fraction of width)
+
+    // ---- per-over bowling phases (index = over number - 1) ----
+    // PACE: straight and true. SPIN: slower, grips and turns off the pitch.
+    // SWING: curls in the air before pitching. BOUNCE: short-pitch barrage.
+    // Death: fast yorkers and surprises at the end.
+    public static final String[] OVER_NAMES = {"PACE", "SPIN", "SWING", "BOUNCE", "DEATH"};
+    public static final String[] OVER_HINTS = {
+            "Over 1 of 5 — PACE. Straight and true off the square.",
+            "Over 2 of 5 — SPIN. Slower through the air, grips and turns off the pitch.",
+            "Over 3 of 5 — SWING. It curls late in the air before it pitches.",
+            "Over 4 of 5 — BOUNCE. Short-pitch barrage, sit under it.",
+            "Over 5 of 5 — DEATH. Fast, full and frantic. Finish strong.",
+    };
+    private static final float[] OVER_TRAVEL = {1500f, 1850f, 1650f, 1550f, 1300f}; // release -> bat (ms)
+    private static final float[] OVER_WOBBLE = {0.020f, 0.035f, 0.020f, 0.020f, 0.015f};
+    private static final float[] OVER_TURN = {0f, 150f, 0f, 0f, 0f};    // px/s lateral kick at the bounce (spin)
+    private static final float[] OVER_CURVE = {0f, 0f, 90f, 0f, 0f};    // px/s^2 in-air drift before the pitch (swing)
+    // cumulative delivery weights per over: YORKER, GOOD LENGTH, SHORT, FULL TOSS
+    private static final float[][] OVER_W = {
+            {0.15f, 0.70f, 0.90f, 1.01f},
+            {0.10f, 0.60f, 0.80f, 1.01f},
+            {0.15f, 0.65f, 0.85f, 1.01f},
+            {0.05f, 0.40f, 0.95f, 1.01f},
+            {0.45f, 0.70f, 0.80f, 1.01f},
+    };
 
     private final float width;
     private final float height;
@@ -108,20 +133,43 @@ public class BoundaryModel {
         }
     }
 
+    /** 0-based index of the over currently being bowled (clamped to the last over). */
+    public synchronized int getOverIndex() {
+        return Math.min(balls / 6, MAX_OVERS - 1);
+    }
+
+    /** Name of the current over's bowling phase: PACE, SPIN, SWING, BOUNCE or DEATH. */
+    public synchronized String getOverType() {
+        return OVER_NAMES[getOverIndex()];
+    }
+
+    /** HUD label for the current over, e.g. "OVER 2/5 · SPIN". */
+    public synchronized String getOverLabel() {
+        int o = getOverIndex();
+        return "OVER " + (o + 1) + "/" + MAX_OVERS + " · " + OVER_NAMES[o];
+    }
+
+    /** One-line description of the current over's bowling phase (lobby/over-change banner). */
+    public synchronized String getOverHint() {
+        return OVER_HINTS[getOverIndex()];
+    }
+
     public synchronized void newBall() {
+        int over = getOverIndex();
         float r = random.nextFloat();
+        float[] w = OVER_W[over];
         String type;
         String hint;
         float lenFrac;
-        if (r < 0.25f) {
+        if (r < w[0]) {
             type = "YORKER";
             hint = "Watch the toes";
             lenFrac = 0.97f;
-        } else if (r < 0.6f) {
+        } else if (r < w[1]) {
             type = "GOOD LENGTH";
             hint = "Watch for the rise";
             lenFrac = 0.8f;
-        } else if (r < 0.85f) {
+        } else if (r < w[2]) {
             type = "SHORT";
             hint = "Back and across";
             lenFrac = 0.62f;
@@ -132,15 +180,21 @@ public class BoundaryModel {
         }
         delivery = type;
         deliveryHint = hint;
-        pitchX = width / 2f + (random.nextFloat() - 0.5f) * width * WOBBLE * 2f;
+        pitchX = width / 2f + (random.nextFloat() - 0.5f) * width * OVER_WOBBLE[over] * 2f;
         pitchY = height * (PITCH_TOP + (lenFrac - 0.47f) * 0.62f);
         float dist = batLineY() - 90;
-        float speed = dist / (TRAVEL_MS / 1000f);   // ~1.5 s release -> bat
+        float speed = dist / (OVER_TRAVEL[over] / 1000f);   // per-over release -> bat travel time
         float dx = pitchX - width / 2f;
         float dy = pitchY - 90;
         float d = (float) Math.sqrt(dx * dx + dy * dy);
         ballVX = dx / d * speed;
         ballVY = dy / d * speed;
+        turnVX = OVER_TURN[over] > 0f
+                ? (random.nextBoolean() ? 1f : -1f) * OVER_TURN[over] * (0.8f + 0.4f * random.nextFloat())
+                : 0f;
+        curveAccel = OVER_CURVE[over] > 0f
+                ? (random.nextBoolean() ? 1f : -1f) * OVER_CURVE[over] * (0.7f + 0.6f * random.nextFloat())
+                : 0f;
         ballX = width / 2f;
         ballY = 90;
         ballLive = true;
@@ -148,6 +202,9 @@ public class BoundaryModel {
         phase = Phase.RUNUP;
         phaseTimer = 0;
     }
+
+    private float turnVX;      // lateral kick applied at the bounce (spin overs)
+    private float curveAccel; // in-air lateral acceleration before the pitch (swing overs)
 
     // phone motion changes ONLY the bat angle (batsman stays put)
     public synchronized void moveBat(float dx, float dy) {
@@ -239,7 +296,9 @@ public class BoundaryModel {
         if (phase != Phase.BOWLING || !ballLive) {
             return;
         }
-        if (ballY < pitchY + 6 || ballY > batLineY()) {
+        // v2.5: generous deliberate-swing window — from just before the pitch
+        // marker all the way to the bat line
+        if (ballY < pitchY - 60 || ballY > batLineY()) {
             swing = 1f;
             return;
         }
@@ -281,10 +340,20 @@ public class BoundaryModel {
                 }
                 break;
             case BOWLING:
+                if (!bounced) {
+                    // swing overs: the ball drifts laterally in the air before pitching
+                    ballVX += curveAccel * dtMs / 1000f;
+                }
                 ballX += ballVX * dtMs / 1000f;
                 ballY += ballVY * dtMs / 1000f;
                 if (!bounced && ballY >= pitchY) {
                     bounced = true; // pitch bounce (visual pulse in the view)
+                    if (turnVX != 0f) {
+                        // spin overs: the ball grips and turns off the pitch
+                        ballVX += turnVX;
+                        turnVX = 0f;
+                        curveAccel = 0f;
+                    }
                 }
                 if (ballY >= batLineY()) {
                     ballLive = false;
@@ -432,7 +501,7 @@ public class BoundaryModel {
     public synchronized String ballByBall() {
         StringBuilder sb = new StringBuilder();
         for (int over = 0; over < MAX_OVERS; over++) {
-            sb.append("Over ").append(over + 1).append(": ");
+            sb.append("Over ").append(over + 1).append(" (").append(OVER_NAMES[over]).append("): ");
             int start = over * 6;
             int end = Math.min(start + 6, ballLog.size());
             for (int i = start; i < end; i++) {
