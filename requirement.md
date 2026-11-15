@@ -116,3 +116,35 @@ and carries, the next it might spin, and so on:
    screen layout matches the design visual.
 5. Tilting the phone visibly aims the bat the same way, and modest angles
    (~±15°) still hit the ball.
+
+## 6. v2.6 addendum — "face the delivery" review fixes
+
+Feedback addressed (design not incorporated, bat appearing to rotate 360°,
+people not visible, game confined to part of the screen):
+
+1. **Full-bleed design backdrop** — the opaque grass plane is gone. The
+   design's stadium render fills the screen edge-to-edge; a translucent tan
+   pitch strip (alpha 0.88) with a dark seating skirt and a popping-crease
+   line is laid centred on top, so the whole screen reads as the game in the
+   design's composition.
+2. **Bat swing rebuilt on batting biomechanics** (per published coaching
+   research: lateral backlift toward the slips, downswing, impact with the
+   face angled into the line of the ball, controlled wrap):
+   - backlift: yaw −30° (toward the slips), elevation 42°, face open 24°;
+   - contact (t = 0.5): yaw exactly the commanded angle (weight 1.0),
+     elevation 0, roll 0 → the blade FACE squares up and meets the ball;
+   - wrap: yaw +45° max, elevation +30°, roll −16° — total sweep < 90°,
+     never a rotation; ghost trail cut to 2 low-alpha frames.
+   - The 2D fallback mirrors the same keyframes (swingPose2D).
+3. **People clearly visible** — batsman and bowler drawn with skin-tone
+   heads, helmets, white pads and gloves over the kit; the bowler now runs
+   in close (z −12.5 → −7) before releasing, and the camera sits tight over
+   the batsman's shoulder (eye 0.9, 1.55, 2.9) so both figures fill the
+   frame.
+4. **Shot-result panel made translucent** (0x66132D25) so the 3D scene stays
+   visible between balls; the panel's layout is unchanged.
+5. Framing per owner's choices: full-bleed backdrop composition, automatic
+   contact retained, batsman + bowler (no extra fielders), result panel kept
+   full-size but transparent.
+
+Version: TV v2.6 (versionCode 11); remote unchanged (v1.2, versionCode 3).
