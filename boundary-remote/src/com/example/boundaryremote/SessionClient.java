@@ -103,8 +103,8 @@ public class SessionClient {
     }
 
     private void restartThreads() {
-        if (netThread != null) {
-            return;
+        if (netThread != null && netThread.isAlive()) {
+            return; // the running loop reconnects with the fresh host/code
         }
         netThread = new Thread(new Runnable() {
             @Override
@@ -138,7 +138,11 @@ public class SessionClient {
             sleep(backoffMs);
             backoffMs = Math.min(5000, (int) (backoffMs * 1.6f));
         }
-        netThread = null;
+        synchronized (this) {
+            if (netThread == Thread.currentThread()) {
+                netThread = null;
+            }
+        }
     }
 
     private void openSocket() throws IOException {

@@ -96,6 +96,9 @@ public class GlSceneView extends GLSurfaceView {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             GLES20.glEnable(GLES20.GL_CULL_FACE);
             program = createProgram(VS, FS);
+            if (program == 0) {
+                program = createProgram(VS_FLAT, FS_FLAT); // unlit, still 3D
+            }
             aPos = GLES20.glGetAttribLocation(program, "aPos");
             aNormal = GLES20.glGetAttribLocation(program, "aNormal");
             aTex = GLES20.glGetAttribLocation(program, "aTex");
@@ -234,6 +237,8 @@ public class GlSceneView extends GLSurfaceView {
         // =====================================================================
         private void drawBackground() {
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+            GLES20.glDepthMask(false); // the backdrop must not stamp depth,
+            // or everything behind its clip plane gets depth-culled
             Matrix.setIdentityM(m, 0);
             Matrix.scaleM(m, 0, 3.2f, 1.8f, 1f);
             GLES20.glUniformMatrix4fv(uModel, 1, false, m, 0);
@@ -244,6 +249,7 @@ public class GlSceneView extends GLSurfaceView {
             Mesh.quadXY().draw(aPos, aNormal, aTex);
             GLES20.glUniformMatrix4fv(uVP, 1, false, vp, 0);
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+            GLES20.glDepthMask(true);
         }
 
         private float[] ortho() {
@@ -755,11 +761,16 @@ public class GlSceneView extends GLSurfaceView {
         private int loadTex(int resId) {
             Bitmap bmp = BitmapFactory.decodeResource(ctx.getResources(), resId);
             int t = texBitmap(bmp);
-            bmp.recycle();
+            if (bmp != null) {
+                bmp.recycle();
+            }
             return t;
         }
 
         private int texBitmap(Bitmap bmp) {
+            if (bmp == null) {
+                bmp = whiteBitmap(); // missing drawable must not kill the scene
+            }
             int[] t = new int[1];
             GLES20.glGenTextures(1, t, 0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, t[0]);
@@ -828,11 +839,14 @@ public class GlSceneView extends GLSurfaceView {
             return b;
         }
 
+        // GLSL ES 1.00 forbids mat3-from-mat4 constructors on many device
+        // drivers, so the normal transform is expanded by hand.
         private static final String VS =
                 "attribute vec3 aPos; attribute vec3 aNormal; attribute vec2 aTex;\n" +
                 "uniform mat4 uVP; uniform mat4 uModel; uniform vec3 uLightDir;\n" +
                 "varying vec2 vTex; varying float vLight;\n" +
-                "void main(){ vec3 n = normalize(mat3(uModel) * aNormal);\n" +
+                "void main(){ vec3 cx = uModel[0].xyz; vec3 cy = uModel[1].xyz; vec3 cz = uModel[2].xyz;\n" +
+                " vec3 n = normalize(cx * aNormal.x + cy * aNormal.y + cz * aNormal.z);\n" +
                 " vLight = max(dot(n, normalize(uLightDir)), 0.0) * 0.75 + 0.35;\n" +
                 " vTex = aTex; gl_Position = uVP * uModel * vec4(aPos, 1.0); }";
 
@@ -843,20 +857,52 @@ public class GlSceneView extends GLSurfaceView {
                 "void main(){ vec4 t = texture2D(uTex, vTex);\n" +
                 " gl_FragColor = vec4(uColor.rgb * vLight, uColor.a) * mix(vec4(1.0), t, uUseTex); }";
 
+        // unlit fallback if the lit pair fails to link on an exotic driver
+        private static final String VS_FLAT =
+                "attribute vec3 aPos; attribute vec3 aNormal; attribute vec2 aTex;\n" +
+                "uniform mat4 uVP; uniform mat4 uModel;\n" +
+                "varying vec2 vTex;\n" +
+                "void main(){ vTex = aTex; gl_Position = uVP * uModel * vec4(aPos, 1.0); }";
+
+        private static final String FS_FLAT =
+                "precision mediump float;\n" +
+                "varying vec2 vTex;\n" +
+                "uniform sampler2D uTex; uniform vec4 uColor; uniform float uUseTex;\n" +
+                "void main(){ vec4 t = texture2D(uTex, vTex);\n" +
+                " gl_FragColor = vec4(uColor.rgb, uColor.a) * mix(vec4(1.0), t, uUseTex); }";
+
         private static int createProgram(String vs, String fs) {
             int v = compile(GLES20.GL_VERTEX_SHADER, vs);
             int f = compile(GLES20.GL_FRAGMENT_SHADER, fs);
+            if (v == 0 || f == 0) {
+                return 0;
+            }
             int p = GLES20.glCreateProgram();
             GLES20.glAttachShader(p, v);
             GLES20.glAttachShader(p, f);
             GLES20.glLinkProgram(p);
+            int[] ok = new int[1];
+            GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, ok, 0);
+            if (ok[0] != GLES20.GL_TRUE) {
+                GLES20.glDeleteProgram(p);
+                return 0;
+            }
             return p;
         }
 
         private static int compile(int type, String src) {
             int s = GLES20.glCreateShader(type);
+            if (s == 0) {
+                return 0;
+            }
             GLES20.glShaderSource(s, src);
             GLES20.glCompileShader(s);
+            int[] ok = new int[1];
+            GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, ok, 0);
+            if (ok[0] != GLES20.GL_TRUE) {
+                GLES20.glDeleteShader(s);
+                return 0;
+            }
             return s;
         }
     }
@@ -1070,14 +1116,20 @@ public class GlSceneView extends GLSurfaceView {
         }
 
         void draw(int aPos, int aNormal, int aTex) {
-            GLES20.glEnableVertexAttribArray(aPos);
-            GLES20.glEnableVertexAttribArray(aNormal);
-            GLES20.glEnableVertexAttribArray(aTex);
-            GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 32, v);
-            v.position(3);
-            GLES20.glVertexAttribPointer(aNormal, 3, GLES20.GL_FLOAT, false, 32, v);
-            v.position(6);
-            GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 32, v);
+            if (aPos >= 0) {
+                GLES20.glEnableVertexAttribArray(aPos);
+                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 32, v);
+            }
+            if (aNormal >= 0) { // -1 when the fallback program drops lighting
+                GLES20.glEnableVertexAttribArray(aNormal);
+                v.position(3);
+                GLES20.glVertexAttribPointer(aNormal, 3, GLES20.GL_FLOAT, false, 32, v);
+            }
+            if (aTex >= 0) {
+                GLES20.glEnableVertexAttribArray(aTex);
+                v.position(6);
+                GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 32, v);
+            }
             v.position(0);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, count);
         }

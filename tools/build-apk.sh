@@ -11,7 +11,10 @@ VNAME=${6:-1.0}
 
 SDK=${ANDROID_SDK:-/workspace/tools/sdk}
 BT=$SDK/build-tools/34.0.0
-PLAT=$SDK/platforms/android-$MINSDK/android.jar
+# Legacy platforms (21/22) are no longer downloadable from dl.google.com,
+# and the -I jar only resolves android resources: compile both apps against
+# the API 23 platform; min/target SDK come from the flags below.
+PLAT=${ANDROID_PLATFORM:-$SDK/platforms/android-23/android.jar}
 JDK=${JAVA_HOME:-/workspace/tools/jdk17}
 export PATH=$JDK/bin:$PATH
 export JAVA_HOME=$JDK

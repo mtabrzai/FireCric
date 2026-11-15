@@ -73,8 +73,8 @@ persistent TCP connection to 8771, `\n`-terminated, tab-separated):
 
 ```bash
 bash tools/get_fonts.sh                                  # Inter (SIL OFL) into both apps
-bash tools/build-apk.sh boundary boundary-tv.apk 22 28 13 3.1
-bash tools/build-apk.sh boundary-remote boundary-remote.apk 21 34 5 2.1
+bash tools/build-apk.sh boundary boundary-tv.apk 22 28 14 3.1.1
+bash tools/build-apk.sh boundary-remote boundary-remote.apk 21 34 6 2.1.1
 ```
 
 Binary assets are generated/downloaded, never committed: run
@@ -111,8 +111,8 @@ java -cp /tmp/t TestBoundary
 Two signed (debug-key) APKs ship with v3.1, delivered as download cards with
 the release notes:
 
-- **Fire TV app** — `boundary-tv-v3.1.apk` (versionCode 13 / versionName 3.1)
-- **Phone remote** — `boundary-remote-v2.1.apk` (versionCode 5 / versionName 2.1)
+- **Fire TV app** — `boundary-tv-v3.1.1.apk` (versionCode 14 / versionName 3.1.1)
+- **Phone remote** — `boundary-remote-v2.1.1.apk` (versionCode 6 / versionName 2.1.1)
 
 Build locally with the commands above to reproduce them exactly.
 

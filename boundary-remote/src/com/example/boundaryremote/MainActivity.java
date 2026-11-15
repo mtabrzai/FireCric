@@ -46,6 +46,7 @@ public class MainActivity extends Activity
     private Timer calTimer;
     private long lastStateMs;
     private Vibrator vibrator;
+    private boolean codeRejected; // TV refused our pairing code
 
     // last pushed state for the reconnect card
     private String lastScore = "0 / 0";
@@ -194,6 +195,7 @@ public class MainActivity extends Activity
             @Override
             public void run() {
                 connectedTvName = tvName;
+                codeRejected = false;
                 stopDiscoveryLoop();
                 ui.setSavedTv(tvName, lastScore);
                 startCalibration();
@@ -256,10 +258,15 @@ public class MainActivity extends Activity
                 if (f.length < 2) {
                     return;
                 }
-                if ("ERR".equals(f[1])) {
+                if ("ERR".equals(f[0])) {
+                    // wrong code / version mismatch: back to the code boxes
+                    codeRejected = true;
+                    ui.setScreen(PhoneUiView.SCREEN_CONNECT);
                     ui.setCode(code, true); // shake the boxes, show the mismatch copy
-                    if ("VERSION".equals(f.length > 2 ? f[2] : "")) {
-                        ui.setCode(code, true);
+                    if ("VERSION".equals(f.length > 1 ? f[1] : "")) {
+                        ui.setCodeError("Both apps must be the same version.\nUpdate Boundary on this phone.");
+                    } else {
+                        ui.setCodeError("That code doesn't match the TV. Check the number on screen.");
                     }
                     return;
                 }
@@ -301,6 +308,11 @@ public class MainActivity extends Activity
             @Override
             public void run() {
                 if (demoState != null) {
+                    return;
+                }
+                if (codeRejected) {
+                    // stay on the connect screen with the code boxes + error
+                    ui.setScreen(PhoneUiView.SCREEN_CONNECT);
                     return;
                 }
                 ui.setSavedTv(connectedTvName, lastScore);
@@ -369,8 +381,10 @@ public class MainActivity extends Activity
         } else if ("tvCard".equals(action) && tvs != null && tvs.size() > 1) {
             showTvChooser();
         } else if ("connect".equals(action)) {
-            stopDiscoveryLoop();
-            connectTo(chosenTv, code);
+            if (chosenTv != null && code.length() == 6) {
+                stopDiscoveryLoop();
+                connectTo(chosenTv, code);
+            }
         } else if ("help".equals(action)) {
             showManualIp();
         } else if ("calibrated".equals(action)) {
@@ -485,38 +499,63 @@ public class MainActivity extends Activity
         return ui.getCurrentScreen();
     }
 
-    /** Opens the soft keyboard with a hidden digit collector for the code boxes. */
+    private EditText codeInput;
+
+    /**
+     * Shows the number keyboard for the code boxes. The collector EditText is
+     * VISIBLE (the IME refuses to open for INVISIBLE views) but stealthy:
+     * 1 px, fully transparent, no background. Created once and reused.
+     */
     private void openCodeInput() {
-        final EditText digits = new EditText(this);
-        digits.setInputType(InputType.TYPE_CLASS_NUMBER);
-        digits.setVisibility(android.view.View.INVISIBLE);
-        addContentView(digits, new FrameLayout.LayoutParams(1, 1));
-        digits.addTextChangedListener(new android.text.TextWatcher() {
-            @Override
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            @Override
-            public void onTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            @Override
-            public void afterTextChanged(android.text.Editable s) {
-                String d = s.toString().replaceAll("\\D", "");
-                if (d.length() > 6) {
-                    d = d.substring(0, 6);
-                    s.replace(0, s.length(), d);
-                    return;
+        if (codeInput == null) {
+            final EditText digits = new EditText(this);
+            digits.setInputType(InputType.TYPE_CLASS_NUMBER);
+            digits.setAlpha(0f);
+            digits.setBackgroundColor(0x00000000);
+            digits.setFocusable(true);
+            digits.setFocusableInTouchMode(true);
+            digits.addTextChangedListener(new android.text.TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence s, int a, int b, int c) {
                 }
-                code = d;
-                ui.setCode(code, false);
-            }
-        });
-        digits.requestFocus();
-        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        if (imm != null) {
-            imm.showSoftInput(digits, InputMethodManager.SHOW_IMPLICIT);
+
+                @Override
+                public void onTextChanged(CharSequence s, int a, int b, int c) {
+                }
+
+                @Override
+                public void afterTextChanged(android.text.Editable s) {
+                    String d = s.toString().replaceAll("\\D", "");
+                    if (d.length() > 6) {
+                        d = d.substring(0, 6);
+                        s.replace(0, s.length(), d);
+                        return;
+                    }
+                    code = d;
+                    codeRejected = false; // the user is fixing the mistake
+                    ui.setCode(code, false);
+                }
+            });
+            addContentView(digits, new FrameLayout.LayoutParams(1, 1));
+            codeInput = digits;
         }
+        codeInput.requestFocus();
+        codeInput.setText(code);
+        codeInput.setSelection(code.length());
+        final InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm == null) {
+            return;
+        }
+        imm.showSoftInput(codeInput, InputMethodManager.SHOW_IMPLICIT);
+        ui.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (imm != null && codeInput != null) {
+                    // second nudge: some IMEs drop the implicit show request
+                    imm.showSoftInput(codeInput, InputMethodManager.SHOW_IMPLICIT);
+                }
+            }
+        }, 150);
     }
 
 }

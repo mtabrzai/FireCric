@@ -47,6 +47,7 @@ public class PhoneUiView extends View {
     private boolean tvFound;
     private String code = "";
     private boolean codeError;
+    private String codeErrorText = "That code doesn't match the TV. Check the number on screen.";
     private long errMs;
 
     // calibrate data
@@ -104,6 +105,12 @@ public class PhoneUiView extends View {
             errMs = android.os.SystemClock.uptimeMillis();
         }
         codeError = error;
+        invalidate();
+    }
+
+    /** Optional copy under the boxes while codeError (version vs code). */
+    public void setCodeError(String message) {
+        codeErrorText = message == null ? "" : message;
         invalidate();
     }
 
@@ -267,8 +274,10 @@ public class PhoneUiView extends View {
             }
         }
         if (codeError) {
-            text(c, "That code doesn't match the TV. Check the number on screen.",
-                    24, 492, reg, 13f, CORAL);
+            String[] lines = codeErrorText.split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                text(c, lines[i], 24, 492 + i * 18, reg, 13f, CORAL);
+            }
         }
 
         boolean ready = tvFound && code.length() == 6;

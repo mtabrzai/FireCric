@@ -221,14 +221,16 @@ public class HudView extends View {
         c.scale(sx, sy);
 
         String s = screen();
-        if (field2D && (s.equals("play"))) {
-            draw2DScene(c);
-        } else if (!field2D) {
-            c.drawColor(BG); // GL failed to init: still avoid flicker
-        }
-        if (field2D && !s.equals("play")) {
+        if (field2D) {
+            // 2D fallback: paint the flat pitch scene behind the HUD
             c.drawColor(BG);
+            if (s.equals("play")) {
+                draw2DScene(c);
+            }
         }
+        // GL path: never paint here. The opaque fill used to cover the whole
+        // live 3D scene under the HUD; result/pause screens add their own
+        // semi-transparent scrims on top of the world.
 
         switch (s) {
             case "lobby":
