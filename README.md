@@ -77,8 +77,8 @@ java -cp /tmp/t TestBoundary
 
 ## APK downloads
 
-The v2.4 release ships two signed (debug-key) APKs, attached to the GitHub
-release for this version and delivered as download cards with the release notes:
+Two signed (debug-key) APKs ship with v2.4, delivered as download cards with
+the release notes:
 
 - **Fire TV app** — `boundary-tv-v2.4-3d.apk` (versionCode 9 / versionName 2.4)
 - **Phone remote** — `boundary-remote-v1.2.apk` (versionCode 3 / versionName 1.2)
