@@ -1,16 +1,21 @@
 # FireCric — Boundary (Fire TV cricket + phone-bat companion)
 
-A two-app cricket game built to the "Boundary" Figma designs. **v2.5 renders the
-in-play scene in real 3D (OpenGL ES 2.0)**, gives the batsman a properly-shaped
-bat, and makes the innings **five overs with a distinct bowling phase per
+A two-app cricket game built to the "Boundary" Figma designs. **v2.6 renders the
+in-play scene in real 3D (OpenGL ES 2.0)** with the design's stadium render
+**full-bleed behind the play**, a **biomechanical bat swing that never rotates
+360°**, and an innings of **five overs with a distinct bowling phase per
 over** — matching the design visual (`design/boundary-face-the-delivery.svg`).
 Full requirements: [`requirement.md`](requirement.md).
 
-- **3D bat swing** — keyframed backlift → downswing → contact → follow-through
-  combining yaw, elevation, roll and a moving hand pivot (a real cone through
-  space, not a flat arc), ghost trail sampled along the swing path, and a live
-  backlift stance between balls whose blade points at ~85% of the commanded
-  tilt, so aiming reads true.
+- **Full-bleed design backdrop** — the stadium render fills the screen
+  edge-to-edge; a translucent pitch strip and the players sit centred on it,
+  so the whole screen is the game (the opaque grass plane is gone).
+- **Biomechanical bat swing (no 360° spin)** — backlift angled ~30° toward the
+  slips (lateral backlift technique), downswing, contact with the blade FACE
+  squared exactly to the commanded angle (elevation 0, roll 0), then a short
+  controlled wrap of ~45°. Total yaw sweep stays under a quarter turn. A subtle
+  2-frame ghost trail hints the path; the stance holds the backlift with the
+  blade already pointing at ~85% of the commanded tilt, so aiming reads true.
 - **Proper bat shape** — cane handle with rubber grip, willow blade with spine
   wedge, shoulders and rounded toe (3D scene and 2D fallback alike).
 - **3D ball pitching** — released from the bowler's hand at ~2 m, parabolic
@@ -22,7 +27,10 @@ Full requirements: [`requirement.md`](requirement.md).
   SPIN (slower, grips and turns off the pitch), Over 3 SWING (curls in the
   air before pitching), Over 4 BOUNCE (short-pitch barrage), Over 5 DEATH
   (fast yorkers, ~1.3 s). The HUD labels the current over at all times.
-- **Broadcast camera** — subtle push-in during the delivery, pan/pull-back
+- **People on the field** — a clearly readable batsman (blue kit, helmet, white
+  pads, gloves) at the crease and a bowler in red who runs in close before
+  releasing, framed tight over-the-shoulder so they fill the screen.
+- **Broadcast camera** — subtle push-in on the delivery, pan/pull-back
   following the struck ball into the deep field.
 
 - **`boundary/`** — the Fire TV app (Fire OS 6+, minSdk 22, targetSdk 28, leanback).
@@ -32,7 +40,8 @@ Full requirements: [`requirement.md`](requirement.md).
     3D bowler run-up with bowling-arm windmill, sphere ball, blob shadows.
   - `HudView` — 2D overlay with the designed screens: lobby with pairing code,
     top HUD (`YOU 12/0`, `OVERS 0.3/2`, `PHONE CONNECTED`), `SWING NOW` tag,
-    contact ring, shot-result breakdown, dot-ball / wicket panels,
+    contact ring, shot-result breakdown (v2.6: translucent fill so the 3D scene
+    stays visible behind it), dot-ball / wicket panels,
     innings-complete stats, and the "GAME PAUSED — your bat disconnected"
     watchdog. The 2D fallback field mirrors the same keyframed swing and
     piecewise-bounce trajectory when GL is unavailable.
@@ -60,7 +69,7 @@ modest tilt angles hit easily); too early on a short ball = caught.
 (JDK 17 + build-tools 34: aapt2/d8/apksigner, debug-signed):
 
 ```bash
-bash tools/build-apk.sh boundary boundary-tv.apk 22 28 10 2.5
+bash tools/build-apk.sh boundary boundary-tv.apk 22 28 11 2.6
 bash tools/build-apk.sh boundary-remote boundary-remote.apk 21 34 3 1.2
 ```
 
@@ -88,10 +97,10 @@ java -cp /tmp/t TestBoundary
 
 ## APK downloads
 
-Two signed (debug-key) APKs ship with v2.5, delivered as download cards with
+Two signed (debug-key) APKs ship with v2.6, delivered as download cards with
 the release notes:
 
-- **Fire TV app** — `boundary-tv-v2.5-5overs.apk` (versionCode 10 / versionName 2.5)
+- **Fire TV app** — `boundary-tv-v2.6-face-the-delivery.apk` (versionCode 11 / versionName 2.6)
 - **Phone remote** — `boundary-remote-v1.2.apk` (versionCode 3 / versionName 1.2)
 
 Build locally with the commands above to reproduce them exactly.
