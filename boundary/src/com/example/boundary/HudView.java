@@ -3,6 +3,7 @@ package com.example.boundary;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.os.SystemClock;
 import android.view.View;
 
 import java.util.List;
@@ -341,32 +342,33 @@ public class HudView extends View {
         canvas.drawCircle(bx, by - 232 * s, 20 * s, kit);
         kit.setColor(0xFF0F2E5C);
         canvas.drawRect(bx - 20 * s, by - 232 * s, bx + 20 * s, by - 224 * s, kit);
-        // bat: 3D-look swing = foreshortened ghost trail + arc (not a flat 2D rotation)
-        float baseAng = (float) Math.toRadians(35 + m.getBatAngle() * 0.9);
+        // bat: keyframed 3D swing path (backlift → downswing → contact → follow-through)
+        // projected to 2D — yaw sweeps in-plane, elevation raises the tip, roll shortens it
         float sw = m.getSwing();
         float dir = m.getSwingDir();
         float hx = bx + 30 * s, hy = by - 170 * s;
         Paint bat = new Paint(Paint.ANTI_ALIAS_FLAG);
         bat.setStrokeCap(Paint.Cap.ROUND);
-        for (int k = 3; k >= 0; k--) {
+        float swT = 1f - sw;
+        float idleBob = sw <= 0 ? 3f * (float) Math.sin(SystemClock.elapsedRealtime() / 400.0) : 0f;
+        for (int k = 4; k >= 0; k--) {
             if (k > 0 && sw <= 0) break;
-            float ang = baseAng + (sw * 120f - k * 18f * (sw > 0 ? dir : 0)) * (float) Math.PI / 180f;
-            float foreshorten = 1f - 0.5f * Math.abs((float) Math.sin(ang));
-            float len = 150 * s * foreshorten;
-            int alpha = k == 0 ? 255 : (int) (90 - k * 25);
+            float tk = Math.max(0f, swT - k * 0.07f);
+            float[] pose = swingPose2D(tk);
+            float yawDeg = 35 + m.getBatAngle() * 0.9f * pose[3] + pose[0] * dir;
+            float ang = (float) Math.toRadians(yawDeg);
+            float elev = (float) Math.toRadians(pose[1] + (k == 0 ? idleBob : 0f));
+            float roll = (float) Math.toRadians(pose[2]);
+            float len = 150 * s * (float) Math.cos(elev);
+            float ce = (float) Math.cos(elev);
+            int alpha = k == 0 ? 255 : (int) (100 - k * 22);
             bat.setColor(0xFFC08A4E);
             bat.setAlpha(alpha);
-            bat.setStrokeWidth((k == 0 ? 13f : 11f) * s * (0.7f + 0.3f * foreshorten));
-            canvas.drawLine(hx, hy, hx + (float) Math.sin(ang) * len, hy + (float) Math.cos(ang) * len, bat);
+            bat.setStrokeWidth((k == 0 ? 13f : 11f) * s * (0.55f + 0.45f * (float) Math.cos(roll)));
+            float tx = hx + (float) Math.sin(ang) * len;
+            float ty = hy + (float) Math.cos(ang) * len * 0.6f - (float) Math.sin(elev) * 150 * s * 0.85f;
+            canvas.drawLine(hx, hy, tx, ty, bat);
         }
-        float ang0 = baseAng + sw * 120f * dir * (float) Math.PI / 180f;
-        float fs0 = 1f - 0.5f * Math.abs((float) Math.sin(ang0));
-        float len0 = 150 * s * fs0;
-        bat.setColor(0xFFE8C79A);
-        bat.setAlpha(255);
-        bat.setStrokeWidth(5 * s);
-        canvas.drawLine(hx + (float) Math.sin(ang0) * len0 * 0.55f, hy + (float) Math.cos(ang0) * len0 * 0.55f,
-                hx + (float) Math.sin(ang0) * len0, hy + (float) Math.cos(ang0) * len0, bat);
 
         if (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING) {
             float runT = m.getPhase() == BoundaryModel.Phase.RUNUP ? 0.4f : 1f;
@@ -387,15 +389,15 @@ public class HudView extends View {
                     : Math.max(0f, Math.min(1f, (m.ballY - 90f) / Math.max(1f, m.batLineY() - 90f)));
             float sx = w * (0.51f + (m.getPhase() == BoundaryModel.Phase.FLYING ? (m.hitX - 960f) / 960f * 0.3f : (m.ballX - 960f) / 960f * 0.3f));
             float sy = h * (0.52f + t * 0.34f) + (m.getPhase() == BoundaryModel.Phase.FLYING ? (m.hitY / 1080f) * h * 0.2f : 0f);
-            // 3D bounce: arcs up after the pitch; shadow shrinks and fades with height
+            // 3D delivery: parabolic descent from the bowler's hand, sharp
+            // velocity-flip bounce with length-dependent rise (matches the GL scene)
             float airUp = 0f;
-            if (m.getPhase() == BoundaryModel.Phase.BOWLING && m.bounced) {
-                float bp = Math.max(0f, Math.min(1f, (m.pitchY - m.ballY) / Math.max(1f, m.pitchY - m.batLineY())));
-                airUp = (float) Math.sin(bp * Math.PI) * h * 0.07f;
+            if (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING) {
+                airUp = Math.max(0f, ballWorldHeight2D(m) - 0.16f) * h * 0.052f;
                 sy -= airUp;
             }
             float br = (10 + t * 18);
-            float shScale = Math.max(0.45f, 1f - airUp / (h * 0.07f) * 0.5f);
+            float shScale = Math.max(0.45f, 1f - airUp / (h * 0.098f) * 0.5f);
             sh.setColor(0x44000000);
             canvas.drawOval(sx - br * shScale, sy + airUp + br * 0.7f, sx + br * shScale, sy + airUp + br * 1.05f, sh);
             Paint ball = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -406,5 +408,63 @@ public class HudView extends View {
             seam.setStrokeWidth(Math.max(2, br * 0.22f));
             canvas.drawLine(sx - br * 0.6f, sy - br * 0.6f, sx + br * 0.6f, sy + br * 0.6f, seam);
         }
+    }
+
+    // ---- shared 3D motion model (mirrors GlSceneView so both renderers agree) ----
+
+    /** Keyframed swing pose at t∈[0,1]: {yawOff°, elevation°, roll°, batAngleWeight}. */
+    static float[] swingPose2D(float t) {
+        float yawOff, elev, roll, w;
+        if (t <= 0.45f) {
+            float x = smoothF(t / 0.45f);
+            yawOff = lerpF(-55f, 5f, x);
+            elev = lerpF(50f, -14f, x);
+            roll = lerpF(38f, -6f, x);
+            w = lerpF(0.50f, 1.00f, x);
+        } else {
+            float x = smoothF((t - 0.45f) / 0.55f);
+            yawOff = lerpF(5f, 118f, x);
+            elev = lerpF(-14f, 46f, x);
+            roll = lerpF(-6f, -54f, x);
+            w = lerpF(1.00f, 1.15f, x);
+        }
+        return new float[]{yawOff, elev, roll, w};
+    }
+
+    /**
+     * Ball centre height in world units (ground=0; release ≈ 2.05) for the delivery
+     * progress p∈[0,1]: parabolic descent, then a sharp bounce at the pitch marker
+     * with length-dependent rise; full tosses never pitch.
+     */
+    static float ballWorldHeight2D(BoundaryModel m) {
+        float batLine = m.batLineY();
+        float span = Math.max(1f, batLine - 90f);
+        float p = Math.max(0f, Math.min(1f, (m.ballY - 90f) / span));
+        if ("FULL TOSS".equals(m.getDelivery())) {
+            return 0.16f + (2.05f - 0.16f) * (float) Math.pow(1f - p, 1.15f);
+        }
+        float rem = Math.max(0f, Math.min(1f, (batLine - m.pitchY) / span));
+        if (p <= rem) {
+            float s2 = rem <= 0f ? 1f : Math.max(0f, Math.min(1f, p / rem));
+            float pre = (1f - s2) * (1f - s2) * (1f + 0.55f * s2) + 0.35f * s2 * (1f - s2);
+            return 0.16f + (2.05f - 0.16f) * pre;
+        }
+        float u = Math.max(0f, Math.min(1f, (p - rem) / Math.max(0.02f, 1f - rem)));
+        float peak = 0.16f + 0.22f + 2.25f * (float) Math.pow(rem, 0.95f);
+        float up = 0.40f;
+        float gEnd = 0.25f + 0.75f * Math.min(1f, rem * 2.4f);
+        float g = u <= up
+                ? (float) Math.pow(u / up, 0.72f)
+                : gEnd + (1f - gEnd) * (float) Math.pow((1f - u) / (1f - up), 1.55f);
+        return 0.16f + (peak - 0.16f) * g;
+    }
+
+    private static float lerpF(float a, float b, float x) {
+        return a + (b - a) * x;
+    }
+
+    private static float smoothF(float x) {
+        x = Math.max(0f, Math.min(1f, x));
+        return 0.5f - 0.5f * (float) Math.cos((float) (x * Math.PI));
     }
 }
