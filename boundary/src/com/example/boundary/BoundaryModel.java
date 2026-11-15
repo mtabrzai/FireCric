@@ -22,7 +22,7 @@ public class BoundaryModel {
     // ---- per-over bowling phases (index = over number - 1) ----
     // PACE: straight and true. SPIN: slower, grips and turns off the pitch.
     // SWING: curls in the air before pitching. BOUNCE: short-pitch barrage.
-    // Death: fast yorkers and surprises at the end.
+    // DEATH: fast yorkers and surprises at the end.
     public static final String[] OVER_NAMES = {"PACE", "SPIN", "SWING", "BOUNCE", "DEATH"};
     public static final String[] OVER_HINTS = {
             "Over 1 of 5 — PACE. Straight and true off the square.",
