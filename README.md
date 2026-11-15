@@ -81,7 +81,7 @@ clamp, no-shake angle EMA, fixed batsman, easy-contact band, innings completion
 deadzone/flush. 23/23 passing.
 
 ```bash
-javac --release 8 -d /tmp/t boundary/src/com/example/boundary/{BoundaryModel,RemoteServer}.java \\
+javac --release 8 -d /tmp/t boundary/src/com/example/boundary/{BoundaryModel,RemoteServer}.java \
   boundary-remote/src/com/example/boundaryremote/{RemoteClient,MotionMapper}.java tools/TestBoundary.java
 java -cp /tmp/t TestBoundary
 ```
