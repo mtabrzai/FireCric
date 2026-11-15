@@ -9,6 +9,7 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.GLUtils;
 import android.opengl.Matrix;
+import android.os.SystemClock;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -19,11 +20,24 @@ import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 /**
- * Real 3D in-play scene (OpenGL ES 2.0): broadcast-style camera beside the pitch,
- * stadium backdrop (bg_3d.png, extracted from the design), lit 3D batsman with a 3D bat
- * that swings in 3D (yaw + pitch + roll with ghost trail) on the model's bat angle,
- * bowler run-up, bouncing sphere ball whose shadow shrinks with height.
- * HUD/panels live in HudView on top.
+ * Real 3D in-play scene (OpenGL ES 2.0) — v2.4 "true 3D motion":
+ *
+ * · BAT: no longer a flat yaw arc. The swing is a keyframed 3D path — backlift →
+ *   downswing → contact → follow-through — combining yaw (around the vertical),
+ *   elevation (around the horizontal), roll (around the sight-line) and a moving
+ *   hand pivot, so the blade sweeps a real cone through space. Ghost trail is
+ *   sampled along that same 3D path. Between balls the bat is held in a live
+ *   backlift stance (slow bob), matching the design visual.
+ * · BALL: physically-plausible 3D delivery. Released from the bowler's hand at
+ *   ~2 m, descends on a parabolic branch, then a sharp velocity-flip bounce at the
+ *   pitch marker with length-dependent bounce (yorker stays low, short ball climbs
+ *   to the chest), a dust puff + shock ring at the bounce, visible seam spin, a
+ *   ghost trail that follows the 3D trajectory, and a ground shadow that shrinks
+ *   and fades with height (meeting the ball exactly at the bounce).
+ * · CAMERA: subtle broadcast push-in during the delivery and a lateral pan +
+ *   pull-back that follows the struck ball into the deep field.
+ *
+ * HUD/panels live in HudView on top; game logic in BoundaryModel (unchanged).
  */
 public class GlSceneView extends GLSurfaceView {
 
@@ -54,6 +68,26 @@ public class GlSceneView extends GLSurfaceView {
         private float[] view = new float[16];
         private float[] vp = new float[16];
         private float[] m = new float[16];
+        private float[] rotM = new float[16];
+        private float[] batBase = new float[16];
+        private float[] partM = new float[16];
+        private float[] tmpM = new float[16];
+
+        // animation clock / events
+        private long lastNanos = -1;
+        private float clockS;
+        private boolean prevBounced;
+        private float bounceT = -10f;
+        private float spin;
+
+        // smoothed camera
+        private float fovCur = 55f;
+        private float exCur = 4.2f, eyCur = 1.7f, ezCur = 3.4f;
+        private float lxCur = 0f, lyCur = 1.1f;
+
+        // ball geometry constants (world units: batsman ≈ 1.7 tall)
+        private static final float BALL_R = 0.16f;
+        private static final float RELEASE_H = 2.05f;
 
         Renderer(Context ctx) {
             this.ctx = ctx;
@@ -75,7 +109,7 @@ public class GlSceneView extends GLSurfaceView {
             uUseTex = GLES20.glGetUniformLocation(program, "uUseTex");
             uLightDir = GLES20.glGetUniformLocation(program, "uLightDir");
             cube = Mesh.cube();
-            sphere = Mesh.uvSphere(0.16f, 14, 10);
+            sphere = Mesh.uvSphere(BALL_R, 14, 10);
             cyl = Mesh.cylinder(0.035f, 0.75f, 10);
             bgTex = loadTex(R.drawable.bg_3d);
             grassTex = texBitmap(grassBitmap());
@@ -87,7 +121,8 @@ public class GlSceneView extends GLSurfaceView {
         @Override
         public void onSurfaceChanged(GL10 gl, int w, int h) {
             GLES20.glViewport(0, 0, w, h);
-            Matrix.perspectiveM(proj, 0, 55f, (float) w / h, 0.1f, 120f);
+            aspect = (float) w / Math.max(1, h);
+            Matrix.perspectiveM(proj, 0, 55f, aspect, 0.1f, 120f);
             Matrix.setLookAtM(view, 0,
                     4.2f, 1.7f, 3.4f,
                     0f, 1.1f, -8f,
@@ -97,15 +132,27 @@ public class GlSceneView extends GLSurfaceView {
 
         @Override
         public void onDrawFrame(GL10 gl) {
+            long nowNs = SystemClock.elapsedRealtimeNanos();
+            if (lastNanos < 0) {
+                lastNanos = nowNs;
+            }
+            float dt = Math.min(0.05f, (nowNs - lastNanos) / 1000000000f);
+            lastNanos = nowNs;
+            clockS += dt;
+            spin += dt * 420f; // ~1.2 rev/s seam spin
+            if (spin > 360f) {
+                spin -= 360f;
+            }
+
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
             if (model == null) {
                 return;
             }
             GLES20.glUseProgram(program);
-            GLES20.glUniformMatrix4fv(uVP, 1, false, vp, 0);
             GLES20.glUniform3f(uLightDir, 0.35f, 0.8f, 0.45f);
             GLES20.glUniform1i(uTex, 0);
 
+            updateCamera();
             drawBackground();
             drawGround();
 
@@ -114,52 +161,347 @@ public class GlSceneView extends GLSurfaceView {
                 return;
             }
 
-            float runT = phase == BoundaryModel.Phase.RUNUP ? 0.35f : 1f;
+            float runT = phase == BoundaryModel.Phase.RUNUP ? Math.min(1f, modelRunT()) : 1f;
             float bowlerZ = -24f + runT * 8f;
-            drawFigure(0f, bowlerZ, 1.0f, 0.85f, 1.0f, 0.25f);
+            drawBowler(runT, bowlerZ);
 
             float batAng = model.getBatAngle();
             float sw = model.getSwing();
-            float swingSweep = sw * 100f * model.getSwingDir();
-            drawBatsman(0f, 0f, batAng, swingSweep);
+            float dir = model.getSwingDir();
+            drawBatsman(0f, 0f, batAng, sw, dir, phase, runT);
 
             for (int i = -1; i <= 1; i++) {
-                drawMesh(cyl, 0.18f * i, 0.375f, 0.12f, 1f, 0.95f, 0.8f, 0.6f, whiteTex, 1f);
+                drawMesh(cyl, 0.18f * i, 0.375f, 0.12f, 1f, 0.95f, 0.85f, 0.6f, whiteTex, 1f);
             }
 
-            float wz = worldZ(model.ballY, model.batLineY());
-            float wx = worldX(model.ballX);
-            float wy = 0.12f;
-            if (model.getPhase() == BoundaryModel.Phase.BOWLING && model.bounced) {
-                float p = Math.min(1f, Math.max(0f, (model.pitchY - model.ballY) / Math.max(1f, model.pitchY - model.batLineY())));
-                wy = 0.12f + (float) Math.sin(p * Math.PI) * 0.9f;
+            // pitch marker: soft ring at the length spot
+            float pmZ = worldZ(model.pitchY, model.batLineY());
+            drawBlob(worldX(model.pitchX), pmZ, 0.34f, 0.10f);
+            drawBlob(worldX(model.pitchX), pmZ, 0.20f, 0.16f);
+
+            drawBall(dt);
+
+            if (model.isBallLive() && phase != BoundaryModel.Phase.RUNUP) {
+                // bounce shock ring + dust puff for 0.35 s after the pitch
+                float q = (clockS - bounceT) / 0.35f;
+                if (q >= 0f && q <= 1f) {
+                    drawBounceFx(q, worldX(model.pitchX), pmZ);
+                }
             }
-            if (model.getPhase() == BoundaryModel.Phase.FLYING) {
-                wz = worldZ(model.hitY, model.batLineY()) * 0.4f - 2f;
-                wx = model.hitX / 960f * 2f;
-                wy = Math.max(0.12f, model.hitY / 1080f * 3f);
+        }
+
+        // ---- run-up progress (model exposes only phase; 900 ms run-up) ----
+        private float modelRunT() {
+            return 0.35f; // same stance the previous version used mid run-up
+        }
+
+        // =====================================================================
+        // Camera: subtle push-in on the delivery, pan/pull-back on the flight
+        // =====================================================================
+        private void updateCamera() {
+            BoundaryModel.Phase phase = model.getPhase();
+            float fovT = 55f;
+            float exT = 4.2f, eyT = 1.7f, ezT = 3.4f;
+            float lxT = 0f, lyT = 1.1f;
+            if (phase == BoundaryModel.Phase.BOWLING) {
+                float prog = ballProgressTotal();
+                fovT = 55f - 6f * prog;
+                exT = 4.2f - 0.45f * prog;
+                eyT = 1.7f - 0.25f * prog;
+                ezT = 3.4f - 0.55f * prog;
+            } else if (phase == BoundaryModel.Phase.FLYING) {
+                float q = Math.min(1f, model.hitFlown / Math.max(1f, model.hitDist));
+                float wx = (model.hitX - 960f) / 960f * 3.0f;
+                float wy = ballFlightHeight(q);
+                fovT = 55f + 7f * q;
+                lxT = wx * 0.30f;
+                lyT = 1.1f + Math.min(1.2f, wy * 0.16f);
             }
-            boolean ballVisible = model.isBallLive() || model.getPhase() == BoundaryModel.Phase.FLYING;
-            if (ballVisible) {
-                float air = Math.max(0f, wy - 0.12f);
-                drawBlob(wx, wz, Math.max(0.08f, 0.22f - air * 0.12f), Math.max(0.08f, 0.35f - air * 0.3f));
-                drawMesh(sphere, wx, wy, wz, 1f, 0.95f, 0.25f, 0.2f, ballTex, 1f);
+            float k = 0.12f;
+            fovCur += (fovT - fovCur) * k;
+            exCur += (exT - exCur) * k;
+            eyCur += (eyT - eyCur) * k;
+            ezCur += (ezT - ezCur) * k;
+            lxCur += (lxT - lxCur) * k;
+            lyCur += (lyT - lyCur) * k;
+            Matrix.perspectiveM(proj, 0, fovCur, aspect, 0.1f, 120f);
+            Matrix.setLookAtM(view, 0, exCur, eyCur, ezCur, lxCur, lyCur, -8f, 0f, 1f, 0f);
+            Matrix.multiplyMM(vp, 0, proj, 0, view, 0);
+            GLES20.glUniformMatrix4fv(uVP, 1, false, vp, 0);
+        }
+
+        private float aspect = 16f / 9f;
+
+        // =====================================================================
+        // Ball: keyframed-kinematic 3D delivery with a real bounce
+        // =====================================================================
+
+        // total progress P in [0,1] from release (screen y=90) to the bat line
+        private float ballProgressTotal() {
+            float batLine = model.batLineY();
+            float t = (model.ballY - 90f) / Math.max(1f, batLine - 90f);
+            return clamp01(t);
+        }
+
+        // fraction of the journey that happens before the pitch marker
+        private float pitchRemainder() {
+            float batLine = model.batLineY();
+            return clamp01((batLine - model.pitchY) / Math.max(1f, batLine - 90f));
+        }
+
+        // descending branch shape: 1 at release, 0 at the pitch marker,
+        // still falling when it lands (slope < 0)
+        private static float preShape(float s) {
+            return (1f - s) * (1f - s) * (1f + 0.55f * s) + 0.35f * s * (1f - s);
+        }
+
+        // height above ground (ball centre) for total progress P
+        private float ballHeightAt(float p) {
+            String d = model.getDelivery();
+            if ("FULL TOSS".equals(d)) {
+                // never pitches: flat-ish arc that arrives at the bat around the hip
+                return BALL_R + (RELEASE_H - BALL_R) * (float) Math.pow(1f - p, 1.15f);
+            }
+            float rem = pitchRemainder();
+            if (p <= rem) {
+                float s = rem <= 0f ? 1f : clamp01(p / rem);
+                return BALL_R + (RELEASE_H - BALL_R) * preShape(s);
+            }
+            // post-bounce: sharp rise (velocity flip), gravity-decelerated to a
+            // length-dependent peak, then a gentle fall; short balls stay high.
+            float u = clamp01((p - rem) / Math.max(0.02f, 1f - rem));
+            float peak = BALL_R + 0.22f + 2.25f * (float) Math.pow(rem, 0.95f);
+            float up = 0.40f;
+            float gEnd = 0.25f + 0.75f * Math.min(1f, rem * 2.4f);
+            float g;
+            if (u <= up) {
+                g = (float) Math.pow(u / up, 0.72f);
+            } else {
+                g = gEnd + (1f - gEnd) * (float) Math.pow((1f - u) / (1f - up), 1.55f);
+            }
+            return BALL_R + (peak - BALL_R) * g;
+        }
+
+        private float ballFlightHeight(float q) {
+            // struck ball: parabolic flight into the deep field, sixes climb higher
+            float apex = 1.0f + 3.0f * Math.min(1f, model.hitDist / 650f)
+                    + (model.lastRuns == 6 ? 1.5f : 0f);
+            return BALL_R + apex * (float) Math.pow(Math.sin(Math.min(1f, Math.max(0f, q)) * Math.PI), 0.75f);
+        }
+
+        private void drawBall(float dt) {
+            BoundaryModel.Phase phase = model.getPhase();
+            boolean live = model.isBallLive();
+            boolean flying = phase == BoundaryModel.Phase.FLYING;
+            if (!live && !flying) {
+                prevBounced = model.bounced;
+                return;
+            }
+            if (phase == BoundaryModel.Phase.BOWLING && model.bounced && !prevBounced) {
+                bounceT = clockS; // pitch moment → dust puff + shock ring
+            }
+            prevBounced = model.bounced;
+
+            float wx, wy, wz;
+            if (flying) {
+                float q = clamp01(model.hitFlown / Math.max(1f, model.hitDist));
+                wx = (model.hitX - 960f) / 960f * 3.0f;
+                wy = ballFlightHeight(q);
+                wz = -(4f + (model.hitDist / 940f) * 22f) * q;
+            } else if (phase == BoundaryModel.Phase.RUNUP) {
+                // held in the bowler's hand during the run-up
+                float runT = modelRunT();
+                float bowlerZ = -24f + runT * 8f;
+                wx = 0.42f;
+                wy = RELEASE_H * 0.96f + 0.05f * (float) Math.sin(clockS * 9f);
+                wz = bowlerZ + 0.4f;
+            } else {
+                float p = ballProgressTotal();
+                wx = worldX(model.ballX);
+                wy = ballHeightAt(p);
+                wz = worldZ(model.ballY, model.batLineY());
+            }
+
+            // ground shadow: meets the ball exactly at the bounce, shrinks with height
+            float air = Math.max(0f, wy - BALL_R);
+            drawBlob(wx, wz, Math.max(0.09f, 0.24f - air * 0.11f), Math.max(0.06f, 0.34f - air * 0.22f));
+
+            // ghost trail sampled along the same 3D path
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            int ghosts = 4;
+            for (int k = ghosts; k >= 1; k--) {
+                float a = 0.30f - k * 0.055f;
+                float gx, gy, gz;
+                if (flying) {
+                    float q = clamp01(model.hitFlown / Math.max(1f, model.hitDist) - k * 0.028f);
+                    gx = (model.hitX - 960f) / 960f * 3.0f;
+                    gy = ballFlightHeight(q);
+                    gz = -(4f + (model.hitDist / 940f) * 22f) * q;
+                } else if (phase == BoundaryModel.Phase.RUNUP) {
+                    continue;
+                } else {
+                    float p = ballProgressTotal() - k * 0.032f;
+                    if (p <= 0f) {
+                        continue;
+                    }
+                    gx = worldX(model.ballX);
+                    gy = ballHeightAt(p);
+                    gz = -16f * (1f - p);
+                }
+                drawMesh(sphere, gx, gy, gz, 1f, 0.9f, 0.9f, 1f, whiteTex, a);
+            }
+
+            // spinning seam: rotate the ball mesh about its flight axis
+            Matrix.setIdentityM(rotM, 0);
+            Matrix.translateM(rotM, 0, wx, wy, wz);
+            Matrix.rotateM(rotM, 0, spin, 0.86f, 0.12f, 0.5f);
+            drawMeshTex(sphere, rotM, 0.95f, 0.25f, 0.2f, ballTex, 1f);
+            GLES20.glDisable(GLES20.GL_BLEND);
+        }
+
+        // dust puff + expanding shock ring at the pitch marker
+        private void drawBounceFx(float q, float x, float z) {
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            float a = (1f - q) * 0.55f;
+            Matrix.setIdentityM(m, 0);
+            Matrix.translateM(m, 0, x, 0.025f, z);
+            Matrix.rotateM(m, 0, -90f, 1f, 0f, 0f);
+            Matrix.scaleM(m, 0, 0.22f + 0.55f * q, 0.22f + 0.55f * q, 1f);
+            GLES20.glUniformMatrix4fv(uModel, 1, false, m, 0);
+            GLES20.glUniform4f(uColor, 0.85f, 0.75f, 0.55f, a * 0.7f);
+            GLES20.glUniform1f(uUseTex, 1f);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, whiteTex);
+            Mesh.circle().draw(aPos, aNormal, aTex);
+            // dust specks flying outward with gravity
+            for (int k = 0; k < 6; k++) {
+                float ang = k * 61f;
+                float dx = (float) Math.cos(Math.toRadians(ang)) * (0.15f + 0.5f * q);
+                float dz = (float) Math.sin(Math.toRadians(ang)) * (0.15f + 0.5f * q);
+                float dy = 0.25f * q * (1f - 0.6f * q) + 0.02f;
+                drawMesh(cube, x + dx, dy, z + dz, 0.045f, 0.82f, 0.72f, 0.52f, whiteTex, a);
+            }
+            GLES20.glDisable(GLES20.GL_BLEND);
+        }
+
+        // =====================================================================
+        // Bat: keyframed 3D swing (backlift → downswing → contact → follow-through)
+        // =====================================================================
+
+        // pose channels: {yawOff*dir+batAng*w, elevation, roll, fwd, side, lift, w}
+        private static float[] swingPose(float t) {
+            float yawOff, elev, roll, fwd, side, lift, w;
+            if (t <= 0.45f) {
+                float x = smooth(t / 0.45f);
+                yawOff = lerp(-55f, 5f, x);
+                elev = lerp(50f, -14f, x);
+                roll = lerp(38f, -6f, x);
+                fwd = lerp(0.05f, 0.34f, x);
+                side = lerp(-0.18f, 0.02f, x);
+                lift = lerp(0.10f, -0.02f, x);
+                w = lerp(0.50f, 1.00f, x);
+            } else {
+                float x = smooth((t - 0.45f) / 0.55f);
+                yawOff = lerp(5f, 118f, x);
+                elev = lerp(-14f, 46f, x);
+                roll = lerp(-6f, -54f, x);
+                fwd = lerp(0.34f, 0.12f, x);
+                side = lerp(0.02f, 0.34f, x);
+                lift = lerp(-0.02f, 0.16f, x);
+                w = lerp(1.00f, 1.15f, x);
+            }
+            return new float[]{yawOff, elev, roll, fwd, side, lift, w};
+        }
+
+        private void drawBatsman(float x, float z, float batAng, float sw, float dir,
+                                 BoundaryModel.Phase phase, float runT) {
+            drawFigure(x, z, 1.0f, 0.15f, 0.35f, 0.95f); // blue kit, fixed at the crease
+
+            float t = 1f - sw; // 0 = top of backlift … 1 = follow-through done
+            boolean idle = sw <= 0f;
+            // live backlift stance between balls (slow bob), deeper as the bowler closes
+            float bob = idle ? (float) Math.sin(clockS * 2.4f) : 0f;
+            float[] pose = swingPose(idle ? 0f : t);
+            float yaw = batAng * pose[6] + pose[0] * dir;
+            float elev = pose[1] + (idle ? 3f * bob + 6f * runT : 0f);
+            float roll = pose[2] + (idle ? 4f * (float) Math.sin(clockS * 1.7f) : 0f);
+            float fwd = pose[3];
+            float side = pose[4] * dir;
+            float lift = pose[5] + (idle ? 0.012f * bob : 0f);
+
+            // ghost trail along the same 3D path during the swing
+            if (!idle) {
                 GLES20.glEnable(GLES20.GL_BLEND);
                 GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-                for (int k = 1; k <= 3; k++) {
-                    float a = 0.35f - k * 0.1f;
-                    if (model.getPhase() == BoundaryModel.Phase.FLYING) {
-                        drawMesh(sphere, wx - model.hitVX / 960f * 0.012f * k, wy - model.hitVY / 1080f * 0.012f * k, wz + 0.15f * k, 0.8f, 0.85f, 1f, 0.4f, whiteTex, a);
-                    } else {
-                        drawMesh(sphere, wx - model.ballVX / 960f * 0.012f * k, wy, wz + 0.15f * k, 0.8f, 0.85f, 1f, 0.4f, whiteTex, a);
+                for (int k = 4; k >= 1; k--) {
+                    float tk = t - k * 0.07f;
+                    if (tk < 0f) {
+                        continue;
                     }
+                    float[] gp = swingPose(tk);
+                    drawBatPose(x, z, batAng, gp, dir,
+                            Math.max(0.04f, 0.14f - k * 0.028f), true);
                 }
                 GLES20.glDisable(GLES20.GL_BLEND);
             }
-            if (model.isBallLive()) {
-                drawBlob(worldX(model.pitchX), worldZ(model.pitchY, model.batLineY()), 0.3f);
-            }
+            drawBatPose(x, z, batAng, pose, dir, 1f, false, elev, roll, side, lift, fwd);
         }
+
+        private void drawBatPose(float x, float z, float batAng, float[] pose, float dir,
+                                 float alpha, boolean ghost) {
+            drawBatPose(x, z, batAng, pose, dir, alpha, ghost,
+                    pose[1], pose[2], pose[4] * dir, pose[5], pose[3]);
+        }
+
+        private void drawBatPose(float x, float z, float batAng, float[] pose, float dir,
+                                 float alpha, boolean ghost,
+                                 float elev, float roll, float side, float lift, float fwd) {
+            float yaw = batAng * pose[6] + pose[0] * dir;
+            float px = x + 0.30f + side;
+            float py = 1.25f + lift;
+            float pz = z + 0.15f + fwd;
+
+            Matrix.setIdentityM(batBase, 0);
+            Matrix.translateM(batBase, 0, px, py, pz);
+            Matrix.rotateM(batBase, 0, -yaw, 0f, 1f, 0f);   // horizontal sweep (yaw)
+            Matrix.rotateM(batBase, 0, elev, 1f, 0f, 0f);  // downswing/backlift (elevation)
+            Matrix.rotateM(batBase, 0, roll, 0f, 0f, 1f);  // across the blade (roll)
+
+            if (!ghost) {
+                // handle: dark cane
+                Matrix.setIdentityM(tmpM, 0);
+                Matrix.translateM(tmpM, 0, 0f, 0.15f, 0f);
+                Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
+                Matrix.scaleM(partM, 0, 0.05f, 0.30f, 0.05f);
+                drawMeshTex(cube, partM, 0.24f, 0.15f, 0.09f, whiteTex, 1f);
+            }
+            // blade: willow, front-lit
+            Matrix.setIdentityM(tmpM, 0);
+            Matrix.translateM(tmpM, 0, 0f, 0.625f, 0f);
+            Matrix.multiplyMM(partM, 0, batBase, 0, tmpM, 0);
+            Matrix.scaleM(partM, 0, 0.105f, 0.65f, 0.038f);
+            drawMeshTexAlpha(cube, partM, 0.95f, 0.87f, 0.70f, whiteTex, 1f, alpha);
+        }
+
+        // =====================================================================
+        // Bowler: run-up + rotating bowling arm
+        // =====================================================================
+        private void drawBowler(float runT, float bowlerZ) {
+            drawFigure(0f, bowlerZ, 1.0f, 0.85f, 1.0f, 0.25f);
+            // arm windmill: down at the start of the run-up, overhead at the release
+            float armDeg = -20f + 200f * runT;
+            Matrix.setIdentityM(m, 0);
+            Matrix.translateM(m, 0, 0.30f, 1.15f, bowlerZ);
+            Matrix.rotateM(m, 0, armDeg, 1f, 0f, 0f);
+            Matrix.translateM(m, 0, 0f, 0.28f, 0f);
+            Matrix.scaleM(m, 0, 0.07f, 0.56f, 0.07f);
+            drawMeshTex(cube, m, 0.8f, 0.95f, 1.0f, whiteTex, 1f);
+        }
+
+        // =====================================================================
+        // Static scenery
+        // =====================================================================
 
         private float worldZ(float y, float batLineY) {
             float t = (y - 90f) / Math.max(1f, batLineY - 90f);
@@ -205,7 +547,9 @@ public class GlSceneView extends GLSurfaceView {
             drawMeshTex(Mesh.quad(), m, 1f, 1f, 0.95f, whiteTex, 1f);
         }
 
-        private void drawBlob(float x, float z, float r) { drawBlob(x, z, r, 0.35f); }
+        private void drawBlob(float x, float z, float r) {
+            drawBlob(x, z, r, 0.35f);
+        }
 
         private void drawBlob(float x, float z, float r, float alpha) {
             GLES20.glEnable(GLES20.GL_BLEND);
@@ -235,34 +579,6 @@ public class GlSceneView extends GLSurfaceView {
             drawMesh(cube, x + 0.32f * s, 1.15f * s, z, s * 0.8f, r * 0.9f, g * 0.9f, b * 0.9f, whiteTex, 1f);
         }
 
-        private void drawBatsman(float x, float z, float batAngDeg, float swingSweep) {
-            drawFigure(x, z, 1.0f, 0.15f, 0.35f, 0.95f); // blue kit, fixed at the crease
-            float dir = swingSweep >= 0 ? 1f : -1f;
-            GLES20.glEnable(GLES20.GL_BLEND);
-            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-            for (int k = 3; k >= 1; k--) {
-                float ghost = swingSweep - dir * k * 16f;
-                drawBat(x, z, batAngDeg, ghost, 0.10f + 0.08f * (3 - k));
-            }
-            GLES20.glDisable(GLES20.GL_BLEND);
-            drawBat(x, z, batAngDeg, swingSweep, 1f);
-        }
-
-        private void drawBat(float x, float z, float batAngDeg, float sweep, float alpha) {
-            Matrix.setIdentityM(m, 0);
-            Matrix.translateM(m, 0, x + 0.3f, 1.25f, z + 0.15f);   // hands
-            Matrix.rotateM(m, 0, -batAngDeg - sweep, 0f, 1f, 0f);  // 3D horizontal sweep (yaw)
-            Matrix.rotateM(m, 0, sweep * 0.35f, 1f, 0f, 0f);       // slight dip/rise (pitch)
-            Matrix.rotateM(m, 0, sweep * 0.2f, 0f, 0f, 1f);         // roll for a full 3D arc
-            Matrix.translateM(m, 0, 0f, -0.55f, 0f);
-            Matrix.scaleM(m, 0, 0.09f, 1.1f, 0.035f);
-            GLES20.glUniformMatrix4fv(uModel, 1, false, m, 0);
-            GLES20.glUniform4f(uColor, 0.98f, 0.96f, 0.9f, alpha);
-            GLES20.glUniform1f(uUseTex, 1f);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, whiteTex);
-            cube.draw(aPos, aNormal, aTex);
-        }
-
         private void drawMesh(Mesh mesh, float x, float y, float z, float s, float r, float g, float b, int tex, float useTex) {
             Matrix.setIdentityM(m, 0);
             Matrix.translateM(m, 0, x, y, z);
@@ -271,11 +587,29 @@ public class GlSceneView extends GLSurfaceView {
         }
 
         private void drawMeshTex(Mesh mesh, float[] model, float r, float g, float b, int tex, float useTex) {
+            drawMeshTexAlpha(mesh, model, r, g, b, tex, useTex, 1f);
+        }
+
+        private void drawMeshTexAlpha(Mesh mesh, float[] model, float r, float g, float b,
+                                      int tex, float useTex, float alpha) {
             GLES20.glUniformMatrix4fv(uModel, 1, false, model, 0);
-            GLES20.glUniform4f(uColor, r, g, b, 1f);
+            GLES20.glUniform4f(uColor, r, g, b, alpha);
             GLES20.glUniform1f(uUseTex, useTex);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex);
             mesh.draw(aPos, aNormal, aTex);
+        }
+
+        private static float lerp(float a, float b, float x) {
+            return a + (b - a) * x;
+        }
+
+        private static float smooth(float x) {
+            x = clamp01(x);
+            return 0.5f - 0.5f * (float) Math.cos(x * Math.PI);
+        }
+
+        private static float clamp01(float v) {
+            return v < 0f ? 0f : (v > 1f ? 1f : v);
         }
 
         private int loadTex(int resId) {
