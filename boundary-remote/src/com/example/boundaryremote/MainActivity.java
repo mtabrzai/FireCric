@@ -1,274 +1,522 @@
 package com.example.boundaryremote;
 
 import android.app.Activity;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.view.View;
+import android.os.Vibrator;
+import android.text.InputType;
+import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
-import android.widget.ProgressBar;
-import android.widget.TextView;
+import android.widget.FrameLayout;
 
-public class MainActivity extends Activity implements View.OnClickListener, SensorEventListener {
+import java.util.List;
+import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
 
-    private static final int TCP_PORT = 8771;
-    private static final int UDP_PORT = 8772;
+/**
+ * Boundary Companion v2.1 — the phone is the bat.
+ *
+ * Screen flow: auto-reconnect to a saved TV (or Connect with auto-discovery
+ * + 6-digit code), a 3-second hold-still calibration that freezes the
+ * neutral stance, then live play: absolute drift-free 2-axis tilt (line ±60°,
+ * height across ±35°) pushed to the TV at up to 30 Hz, a giant SWING button
+ * plus flick-to-swing, a live 120° hitting-zone view, Smart Assist toggle,
+ * haptics for release / hit / boundary / wicket, and auto-reconnect with
+ * backoff if the session drops.
+ */
+public class MainActivity extends Activity
+        implements SessionClient.Listener, TiltTracker.Listener, PhoneUiView.Tap {
 
-    private View panelConnect;
-    private View panelCalibrate;
-    private View panelPlay;
-    private EditText ipInput;
-    private TextView connectStatus;
-    private TextView calibText;
-    private ProgressBar calibBar;
-    private TextView playStatus;
-    private TextView playScore;
-    private TextView playHint;
+    private PhoneUiView ui;
+    private SessionClient client;
+    private Discovery discovery;
+    private PairingPrefs prefs;
+    private TiltTracker tracker;
 
-    private SensorManager sensorManager;
-    private Sensor gyro;
-    private Sensor accel;
-    private final MotionMapper mapper = new MotionMapper();
-    private final Handler handler = new Handler();
+    private List<Discovery.TvInfo> tvs;
+    private Discovery.TvInfo chosenTv;
+    private String code = "";
+    private String connectedTvName = "Fire TV";
 
-    private String host = "";
-    private int calibLeft = 3;
-    private float baseX;
-    private float baseY;
-    private float baseZ;
-    private boolean calibrated;
-    private long lastAccel;
-    private float lastAccelMag;
+    private long calStartMs;
+    private Timer calTimer;
+    private long lastStateMs;
+    private Vibrator vibrator;
+
+    // last pushed state for the reconnect card
+    private String lastScore = "0 / 0";
+    private String lastScreen = "LOBBY";
+
+    private String demoState;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
-        panelConnect = findViewById(R.id.panel_connect);
-        panelCalibrate = findViewById(R.id.panel_calibrate);
-        panelPlay = findViewById(R.id.panel_play);
-        ipInput = (EditText) findViewById(R.id.ip_input);
-        connectStatus = (TextView) findViewById(R.id.connect_status);
-        calibText = (TextView) findViewById(R.id.calib_text);
-        calibBar = (ProgressBar) findViewById(R.id.calib_bar);
-        playStatus = (TextView) findViewById(R.id.play_status);
-        playScore = (TextView) findViewById(R.id.play_score);
-        playHint = (TextView) findViewById(R.id.play_hint);
-        findViewById(R.id.btn_find).setOnClickListener(this);
-        findViewById(R.id.btn_connect).setOnClickListener(this);
-        findViewById(R.id.btn_swing).setOnClickListener(this);
-        findViewById(R.id.btn_start).setOnClickListener(this);
-        findViewById(R.id.btn_pause).setOnClickListener(this);
-        findViewById(R.id.btn_reset).setOnClickListener(this);
-        showPanel(panelConnect);
-        connectStatus.setText("Searching for your Fire TV…");
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (panelConnect.getVisibility() == View.VISIBLE && host.length() == 0) {
-                    discover();
-                }
-            }
-        }, 800);
-    }
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-    private void showPanel(View p) {
-        panelConnect.setVisibility(p == panelConnect ? View.VISIBLE : View.GONE);
-        panelCalibrate.setVisibility(p == panelCalibrate ? View.VISIBLE : View.GONE);
-        panelPlay.setVisibility(p == panelPlay ? View.VISIBLE : View.GONE);
-    }
+        ui = new PhoneUiView(this, this);
+        setContentView(ui);
 
-    private final Runnable keepalive = new Runnable() {
-        @Override
-        public void run() {
-            if (panelPlay.getVisibility() == View.VISIBLE && host.length() > 0) {
-                send("PING"); // quiet keepalive so the TV watchdog never false-pauses
-            }
-            handler.postDelayed(this, 3000);
+        prefs = new PairingPrefs(this);
+        discovery = new Discovery(this);
+        client = new SessionClient(this);
+        tracker = new TiltTracker(this, this);
+        vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+
+        String demo = getIntent() == null ? null : getIntent().getStringExtra("demo");
+        if (demo != null) {
+            demoState = demo;
+            applyDemo(demo);
+            return;
         }
-    };
+
+        // saved TV -> auto-connect; otherwise start discovery
+        PairingPrefs.SavedTv saved = prefs.load();
+        if (saved != null) {
+            chosenTv = new Discovery.TvInfo(saved.ip, saved.port, saved.name);
+            code = saved.code;
+            ui.setSavedTv(saved.name, "0 / 0");
+            ui.setScreen(PhoneUiView.SCREEN_RECONNECT);
+            connectTo(chosenTv, code);
+        } else {
+            ui.setScreen(PhoneUiView.SCREEN_CONNECT);
+            startDiscoveryLoop();
+        }
+    }
 
     @Override
     protected void onResume() {
         super.onResume();
-        sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
-        if (sensorManager != null) {
-            gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-            accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-            if (gyro != null) {
-                sensorManager.registerListener(this, gyro, SensorManager.SENSOR_DELAY_GAME);
-            }
-            if (accel != null) {
-                sensorManager.registerListener(this, accel, SensorManager.SENSOR_DELAY_GAME);
-            }
+        if (demoState == null) {
+            tracker.start();
         }
-        handler.postDelayed(keepalive, 3000);
     }
 
     @Override
     protected void onPause() {
-        if (sensorManager != null) {
-            sensorManager.unregisterListener(this);
-        }
-        handler.removeCallbacks(keepalive);
-        handler.removeCallbacksAndMessages(null);
         super.onPause();
+        tracker.stop();
     }
 
     @Override
-    public void onSensorChanged(SensorEvent event) {
-        if (event.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
-            if (!calibrated && panelCalibrate.getVisibility() == View.VISIBLE) {
-                baseX = baseX * 0.9f + event.values[0] * 0.1f;
-                baseY = baseY * 0.9f + event.values[1] * 0.1f;
-                baseZ = baseZ * 0.9f + event.values[2] * 0.1f;
-                return;
+    protected void onDestroy() {
+        super.onDestroy();
+        client.disconnect();
+        stopDiscoveryLoop();
+    }
+
+    // =====================================================================
+    // Demo states for visual QA (adb --es demo CONNECT|CALIBRATE|PLAY|RECONNECT)
+    // =====================================================================
+    private void applyDemo(String s) {
+        if ("CALIBRATE".equals(s)) {
+            ui.setScreen(PhoneUiView.SCREEN_CALIBRATE);
+            ui.setCalProgress(0.6f);
+        } else if ("PLAY".equals(s)) {
+            ui.setScreen(PhoneUiView.SCREEN_PLAY);
+            ui.setPlayHud("18 / 0", "OVER 1 · PACE", "Watch the ball. Time your swing.");
+            ui.setPrimary("SWING", true);
+            ui.setSecondary("PAUSE GAME", true);
+        } else if ("RECONNECT".equals(s)) {
+            ui.setScreen(PhoneUiView.SCREEN_RECONNECT);
+            ui.setSavedTv("Living room", "12 / 0 · 0.3 / 5");
+        } else {
+            ui.setScreen(PhoneUiView.SCREEN_CONNECT);
+            ui.setTv("Living room", true);
+            ui.setCode("48261", false);
+        }
+    }
+
+    // =====================================================================
+    // Discovery
+    // =====================================================================
+    private Timer discoverTimer;
+
+    private void startDiscoveryLoop() {
+        stopDiscoveryLoop();
+        discoverTimer = new Timer();
+        discoverTimer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                discovery.probe(new Discovery.Callback() {
+                    @Override
+                    public void onTvsFound(final List<Discovery.TvInfo> found) {
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                tvs = found;
+                                if (chosenTv == null) {
+                                    if (!found.isEmpty()) {
+                                        chosenTv = found.get(0);
+                                        ui.setTv(chosenTv.name, true);
+                                    } else {
+                                        ui.setTv(null, false);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
             }
-            if (panelPlay.getVisibility() != View.VISIBLE) {
-                return;
+        }, 0, 3000);
+    }
+
+    private void stopDiscoveryLoop() {
+        if (discoverTimer != null) {
+            discoverTimer.cancel();
+            discoverTimer = null;
+        }
+    }
+
+    // =====================================================================
+    // Connecting
+    // =====================================================================
+    private void connectTo(Discovery.TvInfo tv, String code) {
+        client.connect(tv.ip, tv.port, code, phoneName());
+    }
+
+    private String phoneName() {
+        String n = Build.MODEL;
+        return n == null || n.isEmpty() ? "Phone" : n;
+    }
+
+    // =====================================================================
+    // SessionClient.Listener
+    // =====================================================================
+    @Override
+    public void onConnected(final String tvName) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                connectedTvName = tvName;
+                stopDiscoveryLoop();
+                ui.setSavedTv(tvName, lastScore);
+                startCalibration();
             }
-            int[] d = mapper.feedGyro(event.values[0] - baseX, event.values[1] - baseY, event.values[2] - baseZ, event.timestamp);
-            if (d != null && (d[0] != 0 || d[1] != 0)) {
-                send("MOVE " + d[0] + " " + d[1]); // tilt = bat angle only
-            }
-        } else if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
-            long t = event.timestamp;
-            if (panelPlay.getVisibility() == View.VISIBLE && t - lastAccel > 350_000_000L) {
-                float mag = (float) Math.sqrt(event.values[0] * event.values[0] + event.values[1] * event.values[1] + event.values[2] * event.values[2]);
-                if (lastAccelMag > 0 && mag - lastAccelMag > 18f) {
-                    send("SWING"); // sharp flick = deliberate shot
+        });
+    }
+
+    @Override
+    public void onState(final Map<String, String> kv) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                lastStateMs = android.os.SystemClock.uptimeMillis();
+                String screen = kv.get("screen");
+                if (screen != null) {
+                    lastScreen = screen;
                 }
-                lastAccelMag = mag;
-                lastAccel = t;
+                String score = kv.get("score");
+                if (score != null) {
+                    lastScore = score;
+                }
+                ui.setSavedTv(connectedTvName, score);
+                String over = kv.get("over");
+                ui.setPlayHud(score == null ? "0 / 0" : "YOU " + score,
+                        over == null ? "" : over, kv.get("hint"));
+                String assist = kv.get("assist");
+                if (assist != null) {
+                    ui.setAssist(!"false".equals(assist));
+                }
+
+                // primary + secondary pills follow the TV state
+                if ("LOBBY".equals(lastScreen)) {
+                    ui.setPrimary("START INNINGS", true);
+                    ui.setSecondary("RECALIBRATE", true);
+                } else if ("READY".equals(lastScreen)) {
+                    ui.setPrimary("START INNINGS", true);
+                    ui.setSecondary("RECALIBRATE", true);
+                } else if ("RESULT".equals(lastScreen)) {
+                    ui.setPrimary("NEXT DELIVERY", true);
+                    ui.setSecondary("RECALIBRATE", true);
+                } else if ("GAME_OVER".equals(lastScreen)) {
+                    ui.setPrimary("PLAY AGAIN", true);
+                    ui.setSecondary("BACK TO LOBBY", true);
+                } else if ("PAUSED".equals(lastScreen)) {
+                    ui.setPrimary("RESUME INNINGS", true);
+                    ui.setSecondary("BACK TO LOBBY", true);
+                } else {
+                    ui.setPrimary("SWING", true);
+                    ui.setSecondary("PAUSE GAME", true);
+                }
             }
+        });
+    }
+
+    @Override
+    public void onEvent(final String[] f) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (f.length < 2) {
+                    return;
+                }
+                if ("ERR".equals(f[1])) {
+                    ui.setCode(code, true); // shake the boxes, show the mismatch copy
+                    if ("VERSION".equals(f.length > 2 ? f[2] : "")) {
+                        ui.setCode(code, true);
+                    }
+                    return;
+                }
+                String kind = f[1];
+                if ("RELEASE".equals(kind)) {
+                    buzz(30); // short tick on ball release
+                } else if ("HIT".equals(kind)) {
+                    int runs = f.length > 2 ? parseIntSafe(f[2]) : 0;
+                    if (runs >= 4) {
+                        buzz(60);
+                        try {
+                            Thread.sleep(90);
+                        } catch (InterruptedException ignored) {
+                        }
+                        buzz(60); // double pulse on a boundary
+                    } else {
+                        buzz(40);
+                    }
+                } else if ("WICKET".equals(kind)) {
+                    buzz(300); // long buzz on a wicket
+                } else if ("DOT".equals(kind)) {
+                    buzz(20);
+                }
+            }
+        });
+    }
+
+    private int parseIntSafe(String s) {
+        try {
+            return Integer.parseInt(s);
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 
     @Override
-    public void onAccuracyChanged(Sensor sensor, int accuracy) {
+    public void onDisconnected() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (demoState != null) {
+                    return;
+                }
+                ui.setSavedTv(connectedTvName, lastScore);
+                ui.setScreen(PhoneUiView.SCREEN_RECONNECT);
+            }
+        });
+    }
+
+    // =====================================================================
+    // Calibration: 3 s of stillness freezes the neutral stance
+    // =====================================================================
+    private void startCalibration() {
+        ui.setScreen(PhoneUiView.SCREEN_CALIBRATE);
+        calStartMs = android.os.SystemClock.uptimeMillis();
+        if (calTimer != null) {
+            calTimer.cancel();
+        }
+        calTimer = new Timer();
+        calTimer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        float q = (android.os.SystemClock.uptimeMillis() - calStartMs) / 3000f;
+                        ui.setCalProgress(q);
+                        if (q >= 1f) {
+                            calTimer.cancel();
+                            calTimer = null;
+                            tracker.calibrate();
+                            client.send("CALIBRATED");
+                            ui.setScreen(PhoneUiView.SCREEN_PLAY);
+                            ui.setPrimary("START INNINGS", true);
+                        }
+                    }
+                });
+            }
+        }, 50, 50);
+    }
+
+    // =====================================================================
+    // TiltTracker.Listener: live 2-axis pose -> TILT (up to 30 Hz, gated in
+    // the tracker) + flick -> SWING
+    // =====================================================================
+    @Override
+    public void onPose(float lineDeg, float heightNorm) {
+        ui.setPose(lineDeg, heightNorm);
+        client.send(Protocol.join("TILT",
+                String.format(java.util.Locale.US, "%.1f", lineDeg),
+                String.format(java.util.Locale.US, "%.2f", heightNorm)));
     }
 
     @Override
-    public void onClick(View v) {
-        int id = v.getId();
-        if (id == R.id.btn_find) {
-            discover();
-        } else if (id == R.id.btn_connect) {
-            host = ipInput.getText().toString().trim();
-            connectStatus.setText("Connecting to " + host + "…");
-            send("PING");
-        } else if (id == R.id.btn_swing) {
-            send("SWING");
-        } else if (id == R.id.btn_start) {
-            send("S");
-        } else if (id == R.id.btn_pause) {
-            send("P");
-        } else if (id == R.id.btn_reset) {
-            send("C");
-            showPanel(panelConnect);
+    public void onFlick() {
+        client.send("SWING");
+        buzz(25);
+    }
+
+    // =====================================================================
+    // PhoneUiView.Tap
+    // =====================================================================
+    @Override
+    public void onTap(String action) {
+        if ("codeBoxes".equals(action)) {
+            openCodeInput();
+        } else if ("tvCard".equals(action) && tvs != null && tvs.size() > 1) {
+            showTvChooser();
+        } else if ("connect".equals(action)) {
+            stopDiscoveryLoop();
+            connectTo(chosenTv, code);
+        } else if ("help".equals(action)) {
+            showManualIp();
+        } else if ("calibrated".equals(action)) {
+            // ring already complete; nothing to do
+        } else if ("assist".equals(action)) {
+            ui.setAssist(!ui.isAssistOn());
+            client.send(ui.isAssistOn() ? "ASSIST\t1" : "ASSIST\t0");
+        } else if ("primary".equals(action)) {
+            sendPrimary();
+        } else if ("second".equals(action)) {
+            sendSecondary();
+        } else if ("reconnectNow".equals(action)) {
+            if (chosenTv != null) {
+                connectTo(chosenTv, code);
+            }
+        } else if ("differentTv".equals(action)) {
+            prefs.clear();
+            chosenTv = null;
+            code = "";
+            ui.setCode("", false);
+            ui.setScreen(PhoneUiView.SCREEN_CONNECT);
+            startDiscoveryLoop();
         }
     }
 
-    private void discover() {
-        connectStatus.setText("Searching for Fire TV on Wi-Fi…");
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    final String ip = RemoteClient.discover(UDP_PORT, 2500);
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            ipInput.setText(ip);
-                            host = ip;
-                            connectStatus.setText("Found Fire TV at " + ip);
-                            send("PING");
-                        }
-                    });
-                } catch (Exception e) {
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            connectStatus.setText("No Fire TV found — enter its IP manually (shown on the TV lobby)");
-                        }
-                    });
-                }
-            }
-        }).start();
+    private void sendPrimary() {
+        String label = ui.getPrimaryLabel();
+        if ("SWING".equals(label)) {
+            client.send("SWING");
+            buzz(25);
+        } else if ("START INNINGS".equals(label)) {
+            client.send("START");
+        } else if ("NEXT DELIVERY".equals(label)) {
+            client.send("NEXT");
+        } else if ("PLAY AGAIN".equals(label)) {
+            client.send("AGAIN");
+        } else if ("RESUME INNINGS".equals(label)) {
+            client.send("RESUME");
+        }
     }
 
-    private void onPong() {
-        showPanel(panelCalibrate);
-        calibLeft = 3;
-        calibBar.setMax(3);
-        calibBar.setProgress(0);
-        calibrated = false;
-        baseX = baseY = baseZ = 0;
-        final Runnable tick = new Runnable() {
-            @Override
-            public void run() {
-                if (panelCalibrate.getVisibility() != View.VISIBLE) {
-                    return;
-                }
-                calibLeft--;
-                if (calibLeft <= 0) {
-                    calibrated = true;
-                    mapper.reset();
-                    playStatus.setText("CONNECTED TO " + host.toUpperCase());
-                    playHint.setText("01 Calibration complete — Neutral position saved. Ready for your first ball.\nYour bat is ready. Eyes on the TV. Phone held securely.\nTilt the phone left/right to angle the bat (120° forward zone). The shot fires automatically when the bat meets the ball. SWING button / flick = deliberate shot.");
-                    showPanel(panelPlay);
-                    send("PING");
-                    return;
-                }
-                calibBar.setProgress(3 - calibLeft);
-                calibText.setText("HOLD STILL\n" + calibLeft + " second" + (calibLeft > 1 ? "s" : "") + " remaining");
-                handler.postDelayed(this, 1000);
-            }
-        };
-        calibText.setText("HOLD STILL\n3 seconds remaining");
-        handler.postDelayed(tick, 1000);
+    private void sendSecondary() {
+        String label = ui.getSecondaryLabel();
+        if ("PAUSE GAME".equals(label)) {
+            client.send("PAUSE");
+        } else if ("RECALIBRATE".equals(label)) {
+            startCalibration();
+        } else if ("BACK TO LOBBY".equals(label)) {
+            client.send("LOBBY");
+        }
     }
 
-    private void send(final String token) {
-        if (host.length() == 0) {
-            connectStatus.setText("Enter the Fire TV IP or tap Find TV");
+    private void showTvChooser() {
+        final CharSequence[] names = new CharSequence[tvs.size()];
+        for (int i = 0; i < tvs.size(); i++) {
+            names[i] = tvs.get(i).name;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Choose your TV")
+                .setItems(names, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        chosenTv = tvs.get(which);
+                        ui.setTv(chosenTv.name, true);
+                    }
+                })
+                .show();
+    }
+
+    private void showManualIp() {
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        input.setHint("192.168.1.42");
+        new AlertDialog.Builder(this)
+                .setTitle("Manual IP")
+                .setMessage("Make sure both devices are on the same Wi-Fi, and the "
+                        + "Boundary app is open on the TV.")
+                .setView(input)
+                .setPositiveButton("Connect", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        String ip = input.getText().toString().trim();
+                        if (!ip.isEmpty() && code.length() == 6) {
+                            chosenTv = new Discovery.TvInfo(ip, Protocol.DEFAULT_TCP_PORT, "Fire TV");
+                            connectTo(chosenTv, code);
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void buzz(int ms) {
+        if (vibrator != null && vibrator.hasVibrator()) {
+            vibrator.vibrate(ms);
+        }
+    }
+
+    // digits for the 6-box code come from a hidden input surfaced on card tap
+    @Override
+    public void onBackPressed() {
+        if (PhoneUiView.SCREEN_CONNECT.equals(currentScreen())
+                && code.length() > 0 && code.length() < 6) {
+            code = code.substring(0, code.length() - 1);
+            ui.setCode(code, false);
             return;
         }
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    final String[] r = RemoteClient.command(host, TCP_PORT, token);
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (r[0].equals("PONG")) {
-                                if (panelConnect.getVisibility() == View.VISIBLE && token.equals("PING")) {
-                                    onPong();
-                                } else {
-                                    connectStatus.setText("Connected to " + host + ":" + TCP_PORT);
-                                    playStatus.setText("CONNECTED TO " + host.toUpperCase());
-                                }
-                                return;
-                            }
-                            playScore.setText(r[0]);
-                            playHint.setText(r[1] + "\nTilt phone = bat angle (±60°) · auto-fires on contact · SWING button/flick = deliberate shot");
-                        }
-                    });
-                } catch (final Exception e) {
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            TextView where = panelConnect.getVisibility() == View.VISIBLE ? connectStatus : playStatus;
-                            where.setText("Can't reach " + host + ":" + TCP_PORT + " — is the Boundary app open on the TV? Same Wi-Fi? Retrying Find TV…");
-                            handler.postDelayed(new Runnable() { public void run() { discover(); } }, 1500);
-                        }
-                    });
-                }
-            }
-        }).start();
+        super.onBackPressed();
     }
+
+    private String currentScreen() {
+        return ui.getCurrentScreen();
+    }
+
+    /** Opens the soft keyboard with a hidden digit collector for the code boxes. */
+    private void openCodeInput() {
+        final EditText digits = new EditText(this);
+        digits.setInputType(InputType.TYPE_CLASS_NUMBER);
+        digits.setVisibility(android.view.View.INVISIBLE);
+        addContentView(digits, new FrameLayout.LayoutParams(1, 1));
+        digits.addTextChangedListener(new android.text.TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void afterTextChanged(android.text.Editable s) {
+                String d = s.toString().replaceAll("\\D", "");
+                if (d.length() > 6) {
+                    d = d.substring(0, 6);
+                    s.replace(0, s.length(), d);
+                    return;
+                }
+                code = d;
+                ui.setCode(code, false);
+            }
+        });
+        digits.requestFocus();
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null) {
+            imm.showSoftInput(digits, InputMethodManager.SHOW_IMPLICIT);
+        }
+    }
+
 }
