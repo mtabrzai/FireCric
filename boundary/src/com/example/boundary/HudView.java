@@ -29,6 +29,7 @@ public class HudView extends View {
     private final Paint lime = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint red = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint panel = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint panelLight = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     public HudView(Context context) {
@@ -38,6 +39,9 @@ public class HudView extends View {
         lime.setColor(0xFFD7FF67);
         red.setColor(0xFFFF895E);
         panel.setColor(0xCC132D25);
+        // v2.6: the shot-result panel uses a lighter fill so the 3D scene
+        // stays visible behind it between balls
+        panelLight.setColor(0x66132D25);
         ringPaint.setStyle(Paint.Style.STROKE);
         ringPaint.setStrokeWidth(10f);
     }
@@ -195,7 +199,7 @@ public class HudView extends View {
     }
 
     private void drawResult(Canvas canvas, BoundaryModel m, int w, int h) {
-        canvas.drawRect(w * 0.30f, h * 0.16f, w * 0.98f, h * 0.94f, panel);
+        canvas.drawRect(w * 0.30f, h * 0.16f, w * 0.98f, h * 0.94f, panelLight);
         text(canvas, lime, 24, "SHOT BREAKDOWN", w * 0.33f, h * 0.24f);
         text(canvas, white, 64, m.resultTitle, w * 0.33f, h * 0.33f);
         text(canvas, muted, 28, m.resultSub, w * 0.33f, h * 0.38f);
@@ -370,8 +374,9 @@ public class HudView extends View {
         }
 
         if (m.getPhase() == BoundaryModel.Phase.RUNUP || m.getPhase() == BoundaryModel.Phase.BOWLING) {
-            float runT = m.getPhase() == BoundaryModel.Phase.RUNUP ? 0.4f : 1f;
-            float px = w * (0.78f - runT * 0.06f), py = h * (0.50f + runT * 0.04f), ps = h / 860f * 0.55f;
+            // v2.6: bowler drawn bigger and closer so he reads clearly
+            float runT = m.getPhase() == BoundaryModel.Phase.RUNUP ? 0.35f : 1f;
+            float px = w * (0.74f - runT * 0.06f), py = h * (0.48f + runT * 0.05f), ps = h / 860f * 0.85f;
             Paint bw = new Paint(Paint.ANTI_ALIAS_FLAG);
             bw.setStrokeCap(Paint.Cap.ROUND);
             bw.setColor(0xFFD33B40);
@@ -458,21 +463,24 @@ public class HudView extends View {
 
     // ---- shared 3D motion model (mirrors GlSceneView so both renderers agree) ----
 
-    /** Keyframed swing pose at t∈[0,1]: {yawOff°, elevation°, roll°, batAngleWeight}. */
+    /** Keyframed swing pose at t∈[0,1]: {yawOff°, elevation°, roll°, batAngleWeight}.
+     *  v2.6: short biomechanical arc — backlift toward the slips (−30°), face
+     *  squared to the commanded angle at contact, controlled ~45° wrap. Never a
+     *  full rotation. */
     static float[] swingPose2D(float t) {
         float yawOff, elev, roll, w;
-        if (t <= 0.45f) {
-            float x = smoothF(t / 0.45f);
-            yawOff = lerpF(-55f, 5f, x);
-            elev = lerpF(50f, -14f, x);
-            roll = lerpF(38f, -6f, x);
-            w = lerpF(0.50f, 1.00f, x);
+        if (t <= 0.5f) {
+            float x = smoothF(t / 0.5f);
+            yawOff = lerpF(-30f, 0f, x);
+            elev = lerpF(42f, 0f, x);
+            roll = lerpF(24f, 0f, x);
+            w = lerpF(0.85f, 1.00f, x);
         } else {
-            float x = smoothF((t - 0.45f) / 0.55f);
-            yawOff = lerpF(5f, 118f, x);
-            elev = lerpF(-14f, 46f, x);
-            roll = lerpF(-6f, -54f, x);
-            w = lerpF(1.00f, 1.15f, x);
+            float x = smoothF((t - 0.5f) / 0.5f);
+            yawOff = lerpF(0f, 45f, x);
+            elev = lerpF(0f, 30f, x);
+            roll = lerpF(0f, -16f, x);
+            w = lerpF(1.00f, 1.05f, x);
         }
         return new float[]{yawOff, elev, roll, w};
     }
