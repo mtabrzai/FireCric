@@ -11,10 +11,13 @@ backgrounds: every frame is rendered. Full requirements:
 - **Live 3D scene, no static crops** — procedural night stadium
   (`tools/gen_stadium.py` → `res/drawable-nodpi/bg_stadium.png`; never a
   Figma screenshot), grass outfield with mow stripes, clay pitch strip with
-  creases, 3D wooden stumps + bails that cartwheel on `BOWLED`, a standing
-  umpire, a bowler who runs in from the top of his mark with a windmilling arm,
-  and an articulated batsman with helmet, pads and gloves holding a 3D willow
-  bat (cane handle, grip, spine wedge, rounded toe).
+  creases, 3D wooden stumps + bails that cartwheel on `BOWLED`, a crouched
+  wicketkeeper and a standing umpire behind the stumps, an articulated bowler
+  (striding run-in, windmilling arm, ball released from his hand) and an
+  articulated batsman (helmet + grille, pads, gloves) holding a 3D willow bat
+  (cane handle, grip, spine wedge, rounded toe) pivoted at his hands — toe
+  resting down in the stance, backlift → contact → follow-through on the
+  swing. Exactly **one ball** on screen at all times: no ghost trail.
 - **Real pitching: bouncing vs non-bouncing** — `FULL TOSS` flies through
   the air on the full (aerial reticle, no pitch ring); `YORKER` pitches at the
   toes and skids (< 0.30 m); `GOOD LENGTH` bounces mid-pitch to stump/waist
@@ -26,9 +29,9 @@ backgrounds: every frame is rendered. Full requirements:
   (0.16–1.32 m, low front-foot dig ↔ drive ↔ back-foot pull). A live lime
   sweet-spot reticle at the crease shows your (line, height) against the
   incoming ball.
-- **Strike physics & four real outcomes** — deliberate swing (button, flick,
-  or TV OK) with a 220 ms biomechanical downswing that squares the blade face
-  at contact; **Smart Assist** (toggleable, default on) auto-strokes 1–4 runs
+- **Strike physics & four real outcomes** — deliberate swing (button or a
+  physical phone flick, only while a delivery is live) with a 220 ms
+  biomechanical downswing that squares the blade face at contact; **Smart Assist** (toggleable, default on) auto-strokes 1–4 runs
   when you line up line ≤ 0.36 m and height ≤ 0.40 m; manual timed swings
   unlock full power and sixes. Miss high over a yorker and it can be
   **BOWLED** through the gate; mis-timed edges loop up and are **CAUGHT**;

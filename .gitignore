@@ -6,3 +6,9 @@ __pycache__/
 assets/fonts/*.ttf
 assets/fonts/OFL.txt
 res/drawable-nodpi/bg_stadium.png
+boundary/assets/fonts/
+boundary-remote/assets/fonts/
+boundary/res/drawable-nodpi/
+boundary/res/drawable-xhdpi/
+boundary/res/mipmap-*/
+boundary-remote/res/mipmap-*/

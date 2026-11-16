@@ -71,9 +71,10 @@ and carries, the next it might spin, and so on:
 - **Bat shape**: a proper cricket bat — cane handle with rubber grip, willow
   blade with a visible spine wedge, shoulders tapering to the handle, rounded
   toe — in the 3D scene and in the 2D fallback. Not a stick or a plank.
-- **Ball**: sphere with seam texture, ~1.2 rev/s seam spin, dust puff + shock
-  ring at the bounce, ghost trail along the real trajectory, ground shadow
-  that meets the ball exactly at the bounce.
+- **Ball**: exactly ONE sphere with seam texture, ~1.2 rev/s seam spin, dust
+  puff + shock ring at the bounce, ground shadow that meets the ball exactly
+  at the bounce. No ghost trail — the ball rides in the bowler's hand until
+  release, then follows the real trajectory alone.
 - **Camera**: broadcast-style — subtle push-in on the delivery, pan/pull-back
   following the struck ball.
 
@@ -134,7 +135,8 @@ people not visible, game confined to part of the screen):
    - contact (t = 0.5): yaw exactly the commanded angle (weight 1.0),
      elevation 0, roll 0 → the blade FACE squares up and meets the ball;
    - wrap: yaw +45° max, elevation +30°, roll −16° — total sweep < 90°,
-     never a rotation; ghost trail cut to 2 low-alpha frames.
+     never a rotation; a 2-frame low-alpha ghost on the BAT only (the ball
+     itself is never trailed — one ball on screen at all times).
    - The 2D fallback mirrors the same keyframes (swingPose2D).
 3. **People clearly visible** — batsman and bowler drawn with skin-tone
    heads, helmets, white pads and gloves over the kit; the bowler now runs
@@ -157,7 +159,7 @@ Boundary Figma designs (`zQwYQprRnZaRDvDk77lWF3`):
 1. **Exhibition-Quality Photo-Composite 2.5D Scene**:
    - Replaced procedural OpenGL blocks with high-resolution Figma stadium artwork and players.
    - Dynamic bat tracking with smooth angle interpolation and biomechanical swing keyframes.
-   - Realistic ball visuals: release silhouette, pitch-marker ellipse ring with ground shadow, contact burst, and curved flight trail.
+   - Realistic ball visuals: single ball released from the bowler's hand, pitch-marker ellipse ring with ground shadow, contact burst.
 
 2. **Figma UI & Typography**:
    - Palette: deep green-black `#060F0E`, dark green panels `#132D25`, lime `#D7FF67`, willow `#F6F8EE`, muted `#AEBFB7`, coral `#FF895E`.

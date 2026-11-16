@@ -367,8 +367,12 @@ public class MainActivity extends Activity
 
     @Override
     public void onFlick() {
-        client.send("SWING");
-        buzz(25);
+        // a physical swing only counts while a delivery is live; on menu/result
+        // screens the flick must not trigger the focused pill
+        if ("IN_PLAY".equals(lastScreen) || "FLYING".equals(lastScreen)) {
+            client.send("SWING");
+            buzz(25);
+        }
     }
 
     // =====================================================================

@@ -93,7 +93,7 @@ public class TiltTracker implements SensorEventListener {
             float ax = e.values[0], ay = e.values[1], az = e.values[2];
             float mag = (float) Math.sqrt(ax * ax + ay * ay + az * az);
             // flick: a sharp total-acceleration spike = a physical swing
-            if (Math.abs(mag - 9.81f) > 18f && now - lastFlickMs > 350) {
+            if (Math.abs(mag - 9.81f) > 12f && now - lastFlickMs > 300) {
                 lastFlickMs = now;
                 listener.onFlick();
             }
