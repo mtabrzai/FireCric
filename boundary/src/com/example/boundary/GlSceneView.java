@@ -166,12 +166,18 @@ public class GlSceneView extends GLSurfaceView {
             drawTurf();
             drawPitch();
             drawFielders();
-            drawStumps(+BoundaryModel.STUMP_Z, model.getStumpAnim());
+
+            BoundaryModel.Phase phase = model.getPhase();
+            float hitKnock = 0f;
+            if (phase == BoundaryModel.Phase.FLYING && model.lastRuns >= 4) {
+                // a big hit pops the bails (the clip shows a bail flying off)
+                hitKnock = 0.30f * clamp01(1f - (clockS - phaseSince) / 0.6f);
+            }
+            drawStumps(+BoundaryModel.STUMP_Z, Math.max(model.getStumpAnim(), hitKnock));
             drawStumps(BoundaryModel.RELEASE_Z, 0f);
             drawKeeper();
             drawUmpire();
 
-            BoundaryModel.Phase phase = model.getPhase();
             if (phase != prevPhase) {
                 prevPhase = phase;
                 phaseSince = clockS;
@@ -403,15 +409,18 @@ public class GlSceneView extends GLSurfaceView {
             drawFielder(-10.5f, -15f, 0.10f, 0.30f, 0.80f);
         }
 
+        /** Fielder in a ready stance: knees bent, hands resting on the knees. */
         private void drawFielder(float x, float z, float r, float g, float b) {
             drawBlob(x, z, 0.34f, 0.26f);
-            drawLimb(x - 0.11f, 0.88f, z, x - 0.11f, 0.05f, z, 0.055f, 0.16f, 0.17f, 0.20f);
-            drawLimb(x + 0.11f, 0.88f, z, x + 0.11f, 0.05f, z, 0.055f, 0.16f, 0.17f, 0.20f);
-            drawBox(x, 1.24f, z, 0.16f, 0.38f, 0.11f, r, g, b);
-            drawLimb(x - 0.19f, 1.22f, z, x - 0.25f, 0.92f, z, 0.042f, r, g, b);
-            drawLimb(x + 0.19f, 1.22f, z, x + 0.25f, 0.92f, z, 0.042f, r, g, b);
-            drawMesh(sphere, x, 1.66f, z, 0.55f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
-            drawBox(x, 1.76f, z, 0.105f, 0.045f, 0.105f, 0.12f, 0.14f, 0.16f); // cap
+            drawLimb(x - 0.11f, 0.86f, z, x - 0.16f, 0.48f, z - 0.12f, 0.055f, 0.16f, 0.17f, 0.20f);
+            drawLimb(x - 0.16f, 0.48f, z - 0.12f, x - 0.13f, 0.05f, z - 0.10f, 0.05f, 0.16f, 0.17f, 0.20f);
+            drawLimb(x + 0.11f, 0.86f, z, x + 0.16f, 0.48f, z - 0.12f, 0.055f, 0.16f, 0.17f, 0.20f);
+            drawLimb(x + 0.16f, 0.48f, z - 0.12f, x + 0.13f, 0.05f, z - 0.10f, 0.05f, 0.16f, 0.17f, 0.20f);
+            drawLimb(x, 0.86f, z, x, 1.18f, z - 0.16f, 0.11f, r, g, b);          // torso leaning in
+            drawLimb(x - 0.17f, 1.14f, z - 0.14f, x - 0.18f, 0.55f, z - 0.22f, 0.042f, r, g, b); // hands on knees
+            drawLimb(x + 0.17f, 1.14f, z - 0.14f, x + 0.18f, 0.55f, z - 0.22f, 0.042f, r, g, b);
+            drawMesh(sphere, x, 1.40f, z - 0.18f, 0.55f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
+            drawBox(x, 1.50f, z - 0.18f, 0.105f, 0.045f, 0.105f, 0.12f, 0.14f, 0.16f); // cap
         }
 
         // =====================================================================
@@ -482,10 +491,17 @@ public class GlSceneView extends GLSurfaceView {
         private void drawBowler(float runT, float bowlerZ, BoundaryModel.Phase phase) {
             float bx = 0.35f, bz = bowlerZ;
             boolean running = phase == BoundaryModel.Phase.RUNUP && runT < 1f;
-            float stride = running ? (float) Math.sin(clockS * 9f) * 0.34f : 0f;
             float bob = running ? Math.abs((float) Math.sin(clockS * 9f)) * 0.05f : 0f;
+            // run-up stride, then the front leg plants forward through the delivery
+            float stride = running ? (float) Math.sin(clockS * 9f) * 0.34f
+                    : (phase == BoundaryModel.Phase.BOWLING
+                        ? 0.22f * Math.min(1f, model.deliveryProgress() / 0.2f) : 0f);
+            // lean into the delivery and HOLD the follow-through through the shot
+            // (front leg extended, body turned toward the batsman, as in the clip)
             float lean = phase == BoundaryModel.Phase.BOWLING
-                    ? Math.min(1f, model.deliveryProgress() / 0.16f) : 0f;
+                    ? Math.min(1f, model.deliveryProgress() / 0.16f)
+                    : (phase == BoundaryModel.Phase.FLYING || phase == BoundaryModel.Phase.BOWLED
+                        || phase == BoundaryModel.Phase.RESULT ? 1f : 0f);
 
             drawBlob(bx, bz, 0.52f, 0.34f);
             float hipY = 0.95f + bob;
@@ -626,16 +642,40 @@ public class GlSceneView extends GLSurfaceView {
             float ct = clamp01(t / 0.5f);
             float ft = clamp01((t - 0.5f) / 0.5f);
             float s = smooth(clamp01(t * 2f));
+            // stroke type from the delivery, as in the reference clip:
+            // front-foot drive vs pace, defensive dig on the yorker, pull on the
+            // short ball, lofted drive on the full toss
+            String dl = model.getDelivery();
+            float ay = model.arriveWorldY();
+            int shot; // 0 drive, 1 defense, 2 pull, 3 loft
+            if ("SHORT".equals(dl)) {
+                shot = 2;
+            } else if ("YORKER".equals(dl) || ay < 0.35f) {
+                shot = 1;
+            } else if ("FULL TOSS".equals(dl)) {
+                shot = 3;
+            } else {
+                shot = 0;
+            }
+            float backlift = shot == 3 ? 62f : 42f;
+            float followPhi, followYaw, followRoll;
+            switch (shot) {
+                case 1: followPhi = -30f; followYaw = 25f; followRoll = -8f; break;  // defensive dig
+                case 2: followPhi = -55f; followYaw = 15f; followRoll = -30f; break; // pull across
+                case 3: followPhi = -85f; followYaw = 55f; followRoll = -20f; break; // lofted drive
+                default: followPhi = -65f; followYaw = 45f; followRoll = -16f; break; // drive
+            }
             // the hands come across the body to the ball line at contact
             float px = lerp(stancePx, 0.05f + bwx, s);
             float py = lerp(stancePy, clamp(batY, 0.85f, 1.30f), s) + 0.10f * (1f - s) * (1f - s);
             float pz = lerp(0.30f, 0.42f, s);
             // aim the blade through the sweet-spot reticle at contact
             float phiC = (float) Math.toDegrees(Math.atan2(0.02f - pz, batY - py));
-            float phi = t < 0.5f ? lerp(42f, phiC, smooth(ct)) : lerp(phiC, phiC - 65f, smooth(ft));
+            float phi = t < 0.5f ? lerp(backlift, phiC, smooth(ct))
+                    : lerp(phiC, phiC + followPhi, smooth(ft));
             float yaw = batAng * 0.85f + (t < 0.5f ? lerp(-35f, 0f, smooth(ct))
-                    : lerp(0f, 45f, smooth(ft))) * dir;
-            float roll = t < 0.5f ? lerp(22f, 0f, smooth(ct)) : lerp(0f, -16f, smooth(ft));
+                    : lerp(0f, followYaw, smooth(ft))) * dir;
+            float roll = t < 0.5f ? lerp(22f, 0f, smooth(ct)) : lerp(0f, followRoll, smooth(ft));
             return new float[]{px, py, pz, yaw, phi, roll};
         }
 
