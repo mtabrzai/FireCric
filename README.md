@@ -12,12 +12,17 @@ backgrounds: every frame is rendered. Full requirements:
   (`tools/gen_stadium.py` → `res/drawable-nodpi/bg_stadium.png`; never a
   Figma screenshot), grass outfield with mow stripes, clay pitch strip with
   creases, 3D wooden stumps + bails that cartwheel on `BOWLED`, a crouched
-  wicketkeeper and a standing umpire behind the stumps, an articulated bowler
-  (striding run-in, windmilling arm, ball released from his hand) and an
-  articulated batsman (helmet + grille, pads, gloves) holding a 3D willow bat
-  (cane handle, grip, spine wedge, rounded toe) pivoted at his hands — toe
-  resting down in the stance, backlift → contact → follow-through on the
-  swing. Exactly **one ball** on screen at all times: no ghost trail.
+  wicketkeeper and a standing umpire behind the stumps, fielders spread in the
+  outfield, an articulated bowler (striding run-in, windmilling arm, ball
+  released from his hand) and an articulated, slightly translucent batsman
+  (helmet + grille, pads, gloves) holding a 3D willow bat (cane handle, grip,
+  spine wedge, rounded toe) pivoted at his hands. The frame mirrors the
+  "Face the delivery" design: **right-handed batsman on the right of the
+  screen, bowler on the left, stumps centre**. Stance = bat down; the phone's
+  pitch axis lifts the bat up/down, roll aims left/right, and a swing plays
+  backlift → contact at the sweet-spot reticle → follow-through. Exactly
+  **one ball** on screen at all times — drawn large with a pulsing ring around
+  it while it travels; no ghost trail.
 - **Real pitching: bouncing vs non-bouncing** — `FULL TOSS` flies through
   the air on the full (aerial reticle, no pitch ring); `YORKER` pitches at the
   toes and skids (< 0.30 m); `GOOD LENGTH` bounces mid-pitch to stump/waist
