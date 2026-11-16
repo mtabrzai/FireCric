@@ -68,6 +68,13 @@ public class GlSceneView extends GLSurfaceView {
         private float[] batBase = new float[16];
         private float[] partM = new float[16];
         private float[] tmpM = new float[16];
+        // horizontal mirror applied to the projection so the batsman reads
+        // RIGHT-handed on screen (the design shows a left-hander; the game
+        // mirrors it: batsman on the right of frame, bowler on the left)
+        private final float[] MIR = {-1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f};
+        private final float[] vpT = new float[16];
+        /** Batsman rendered slightly translucent so the ball/reticle stay visible through him. */
+        private static final float BATSMAN_A = 0.78f;
 
         private long lastNanos = -1;
         private float clockS;
@@ -84,9 +91,9 @@ public class GlSceneView extends GLSurfaceView {
         private float exCur = 0.85f, eyCur = 1.65f, ezCur = 3.6f;
         private float lxCur = -0.1f, lyCur = 0.9f;
 
-        // visual scale: the ball is drawn a touch larger than life so it reads
-        // from across the living room
-        private static final float BALL_R = 0.11f;
+        // visual scale: the ball is drawn larger than life so it reads clearly
+        // from across the living room (design shows a bold red ball + ring)
+        private static final float BALL_R = 0.15f;
 
         Renderer(Context ctx) {
             this.ctx = ctx;
@@ -96,7 +103,7 @@ public class GlSceneView extends GLSurfaceView {
         public void onSurfaceCreated(GL10 gl, EGLConfig config) {
             GLES20.glClearColor(0.023f, 0.059f, 0.055f, 1f); // #060F0E
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-            GLES20.glEnable(GLES20.GL_CULL_FACE);
+            GLES20.glDisable(GLES20.GL_CULL_FACE); // projection is mirrored, winding flips
             program = createProgram(VS, FS);
             if (program == 0) {
                 program = createProgram(VS_FLAT, FS_FLAT); // unlit, still 3D
@@ -128,6 +135,8 @@ public class GlSceneView extends GLSurfaceView {
             Matrix.perspectiveM(proj, 0, 52f, aspect, 0.1f, 160f);
             Matrix.setLookAtM(view, 0, 0.85f, 1.65f, 3.6f, -0.1f, 0.9f, -9f, 0f, 1f, 0f);
             Matrix.multiplyMM(vp, 0, proj, 0, view, 0);
+            Matrix.multiplyMM(vpT, 0, MIR, 0, vp, 0);
+            System.arraycopy(vpT, 0, vp, 0, 16);
         }
 
         @Override
@@ -156,6 +165,7 @@ public class GlSceneView extends GLSurfaceView {
             drawBackground();
             drawTurf();
             drawPitch();
+            drawFielders();
             drawStumps(+BoundaryModel.STUMP_Z, model.getStumpAnim());
             drawStumps(BoundaryModel.RELEASE_Z, 0f);
             drawKeeper();
@@ -230,6 +240,8 @@ public class GlSceneView extends GLSurfaceView {
             Matrix.perspectiveM(proj, 0, fovCur, aspect, 0.1f, 160f);
             Matrix.setLookAtM(view, 0, exCur, eyCur, ezCur, lxCur, lyCur, -12f, 0f, 1f, 0f);
             Matrix.multiplyMM(vp, 0, proj, 0, view, 0);
+            Matrix.multiplyMM(vpT, 0, MIR, 0, vp, 0);
+            System.arraycopy(vpT, 0, vp, 0, 16);
             GLES20.glUniformMatrix4fv(uVP, 1, false, vp, 0);
         }
 
@@ -303,18 +315,18 @@ public class GlSceneView extends GLSurfaceView {
             float kick = knock * 0.45f; // and lift off the ground
             for (int i = -1; i <= 1; i++) {
                 Matrix.setIdentityM(m, 0);
-                Matrix.translateM(m, 0, i * 0.114f, 0.36f + kick * (i + 2) * 0.25f, z + 0.02f + knock * 0.5f * (i + 2) * 0.3f);
+                Matrix.translateM(m, 0, i * 0.114f, 0.40f + kick * (i + 2) * 0.25f, z + 0.02f + knock * 0.5f * (i + 2) * 0.3f);
                 Matrix.rotateM(m, 0, -lean * (0.6f + 0.2f * i), 1f, 0f, 0f);
-                Matrix.scaleM(m, 0, 0.038f, 0.72f, 0.038f);
-                drawMeshTex(cube, m, 0.93f, 0.84f, 0.62f, whiteTex, 1f);
+                Matrix.scaleM(m, 0, 0.046f, 0.80f, 0.046f);
+                drawMeshTex(cube, m, 0.98f, 0.92f, 0.70f, whiteTex, 1f);
             }
             if (knock <= 0f) {
                 // bails resting on top
                 for (int i = -1; i <= 0; i++) {
                     Matrix.setIdentityM(m, 0);
-                    Matrix.translateM(m, 0, (i + 0.5f) * 0.114f, 0.73f, z + 0.02f);
+                    Matrix.translateM(m, 0, (i + 0.5f) * 0.114f, 0.81f, z + 0.02f);
                     Matrix.scaleM(m, 0, 0.055f, 0.032f, 0.032f);
-                    drawMeshTex(cube, m, 0.95f, 0.87f, 0.66f, whiteTex, 1f);
+                    drawMeshTex(cube, m, 0.99f, 0.94f, 0.76f, whiteTex, 1f);
                 }
             } else {
                 // bails flying: spin away along the knockback arc
@@ -336,6 +348,11 @@ public class GlSceneView extends GLSurfaceView {
         /** Box segment from (x1,y1,z1) to (x2,y2,z2) with half-thickness th. */
         private void drawLimb(float x1, float y1, float z1, float x2, float y2, float z2,
                               float th, float r, float g, float b) {
+            drawLimbA(x1, y1, z1, x2, y2, z2, th, r, g, b, 1f);
+        }
+
+        private void drawLimbA(float x1, float y1, float z1, float x2, float y2, float z2,
+                               float th, float r, float g, float b, float alpha) {
             float dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
             float h = (float) Math.sqrt(dx * dx + dz * dz);
             float len = (float) Math.sqrt(h * h + dy * dy);
@@ -349,13 +366,52 @@ public class GlSceneView extends GLSurfaceView {
             Matrix.rotateM(m, 0, yawDeg, 0f, 1f, 0f);
             Matrix.rotateM(m, 0, pitchDeg, 1f, 0f, 0f);
             Matrix.scaleM(m, 0, th, len / 2f, th);
-            drawMeshTex(cube, m, r, g, b, whiteTex, 1f);
+            drawMeshTexAlpha(cube, m, r, g, b, whiteTex, 1f, alpha);
+        }
+
+        private void drawBoxA(float x, float y, float z, float hx, float hy, float hz,
+                              float r, float g, float b, float alpha) {
+            Matrix.setIdentityM(m, 0);
+            Matrix.translateM(m, 0, x, y, z);
+            Matrix.scaleM(m, 0, hx * 2f, hy * 2f, hz * 2f);
+            drawMeshTexAlpha(cube, m, r, g, b, whiteTex, 1f, alpha);
+        }
+
+        private void drawSphereA(float x, float y, float z, float s, float r, float g, float b, float alpha) {
+            Matrix.setIdentityM(m, 0);
+            Matrix.translateM(m, 0, x, y, z);
+            Matrix.scaleM(m, 0, s, s, s);
+            drawMeshTexAlpha(sphere, m, r, g, b, whiteTex, 1f, alpha);
         }
 
         /** Point at len along a sagittal arm direction: deg 0 = down, 90 = fwd, 180 = up. */
         private float[] armPoint(float sx, float sy, float sz, float len, float deg) {
             double rad = Math.toRadians(deg);
             return new float[]{sx, sy + len * (float) -Math.cos(rad), sz + len * (float) Math.sin(rad)};
+        }
+
+        // =====================================================================
+        // Fielders spread around the outfield ("here and there")
+        // =====================================================================
+        private void drawFielders() {
+            drawFielder(-4.5f, -10f, 0.10f, 0.30f, 0.80f);
+            drawFielder(3.0f, -13f, 0.55f, 0.12f, 0.18f);
+            drawFielder(-7.5f, -22f, 0.95f, 0.95f, 0.93f);
+            drawFielder(6.5f, -25f, 0.10f, 0.30f, 0.80f);
+            drawFielder(-2.5f, -31f, 0.55f, 0.12f, 0.18f);
+            drawFielder(9.0f, -17f, 0.95f, 0.95f, 0.93f);
+            drawFielder(-10.5f, -15f, 0.10f, 0.30f, 0.80f);
+        }
+
+        private void drawFielder(float x, float z, float r, float g, float b) {
+            drawBlob(x, z, 0.34f, 0.26f);
+            drawLimb(x - 0.11f, 0.88f, z, x - 0.11f, 0.05f, z, 0.055f, 0.16f, 0.17f, 0.20f);
+            drawLimb(x + 0.11f, 0.88f, z, x + 0.11f, 0.05f, z, 0.055f, 0.16f, 0.17f, 0.20f);
+            drawBox(x, 1.24f, z, 0.16f, 0.38f, 0.11f, r, g, b);
+            drawLimb(x - 0.19f, 1.22f, z, x - 0.25f, 0.92f, z, 0.042f, r, g, b);
+            drawLimb(x + 0.19f, 1.22f, z, x + 0.25f, 0.92f, z, 0.042f, r, g, b);
+            drawMesh(sphere, x, 1.66f, z, 0.55f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
+            drawBox(x, 1.76f, z, 0.105f, 0.045f, 0.105f, 0.12f, 0.14f, 0.16f); // cap
         }
 
         // =====================================================================
@@ -431,37 +487,37 @@ public class GlSceneView extends GLSurfaceView {
             float lean = phase == BoundaryModel.Phase.BOWLING
                     ? Math.min(1f, model.deliveryProgress() / 0.16f) : 0f;
 
-            drawBlob(bx, bz, 0.42f, 0.30f);
+            drawBlob(bx, bz, 0.52f, 0.34f);
             float hipY = 0.95f + bob;
             // legs: hip -> knee -> shoe, striding during the run-up
-            drawLimb(bx - 0.16f, hipY, bz, bx - 0.16f, 0.50f, bz + stride * 0.7f, 0.085f, 0.93f, 0.93f, 0.90f);
-            drawLimb(bx - 0.16f, 0.50f, bz + stride * 0.7f, bx - 0.16f, 0.06f, bz + stride, 0.065f, 0.93f, 0.93f, 0.90f);
-            drawLimb(bx + 0.16f, hipY, bz, bx + 0.16f, 0.50f, bz - stride * 0.7f, 0.085f, 0.93f, 0.93f, 0.90f);
-            drawLimb(bx + 0.16f, 0.50f, bz - stride * 0.7f, bx + 0.16f, 0.06f, bz - stride, 0.065f, 0.93f, 0.93f, 0.90f);
-            drawBox(bx - 0.16f, 0.045f, bz + stride - 0.05f, 0.07f, 0.045f, 0.10f, 0.15f, 0.12f, 0.12f);
-            drawBox(bx + 0.16f, 0.045f, bz - stride - 0.05f, 0.07f, 0.045f, 0.10f, 0.15f, 0.12f, 0.12f);
+            drawLimb(bx - 0.16f, hipY, bz, bx - 0.16f, 0.50f, bz + stride * 0.7f, 0.10f, 0.93f, 0.93f, 0.90f);
+            drawLimb(bx - 0.16f, 0.50f, bz + stride * 0.7f, bx - 0.16f, 0.06f, bz + stride, 0.076f, 0.93f, 0.93f, 0.90f);
+            drawLimb(bx + 0.16f, hipY, bz, bx + 0.16f, 0.50f, bz - stride * 0.7f, 0.10f, 0.93f, 0.93f, 0.90f);
+            drawLimb(bx + 0.16f, 0.50f, bz - stride * 0.7f, bx + 0.16f, 0.06f, bz - stride, 0.076f, 0.93f, 0.93f, 0.90f);
+            drawBox(bx - 0.16f, 0.045f, bz + stride - 0.05f, 0.08f, 0.05f, 0.11f, 0.15f, 0.12f, 0.12f);
+            drawBox(bx + 0.16f, 0.045f, bz - stride - 0.05f, 0.08f, 0.05f, 0.11f, 0.15f, 0.12f, 0.12f);
             // shorts + torso leaning into the delivery
-            drawBox(bx, hipY + 0.05f, bz, 0.20f, 0.12f, 0.14f, 0.93f, 0.93f, 0.90f);
+            drawBox(bx, hipY + 0.05f, bz, 0.22f, 0.13f, 0.15f, 0.93f, 0.93f, 0.90f);
             float shX = bx, shY = 1.34f + bob, shZ = bz - 0.14f * lean;
-            drawLimb(bx, hipY + 0.10f, bz, shX, shY, shZ, 0.115f, 0.97f, 0.96f, 0.92f);
+            drawLimb(bx, hipY + 0.10f, bz, shX, shY, shZ, 0.13f, 1.0f, 0.99f, 0.95f);
             // head + cap (peak toward the batsman)
             float hx = shX, hy = shY + 0.20f, hz = shZ - 0.02f;
-            drawMesh(sphere, hx, hy, hz, 0.62f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
-            drawBox(hx, hy + 0.10f, hz, 0.115f, 0.05f, 0.115f, 0.97f, 0.96f, 0.92f);
-            drawBox(hx, hy + 0.065f, hz - 0.11f, 0.10f, 0.02f, 0.03f, 0.97f, 0.96f, 0.92f);
+            drawMesh(sphere, hx, hy, hz, 0.72f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
+            drawBox(hx, hy + 0.11f, hz, 0.125f, 0.055f, 0.125f, 1.0f, 0.99f, 0.95f);
+            drawBox(hx, hy + 0.07f, hz - 0.12f, 0.11f, 0.022f, 0.032f, 1.0f, 0.99f, 0.95f);
             // non-bowling arm swings opposite to the windmill
             float armDeg = bowlerArmDeg(runT, bowlerZ, phase);
             float otherDeg = armDeg + 150f;
             float[] elbowL = armPoint(0.10f, 1.30f + bob, bz, 0.34f, otherDeg + 20f);
             float[] handL = armPoint(0.10f, 1.30f + bob, bz, 0.62f, otherDeg);
-            drawLimb(0.10f, 1.30f + bob, bz, elbowL[0], elbowL[1], elbowL[2], 0.055f, 0.97f, 0.96f, 0.92f);
-            drawLimb(elbowL[0], elbowL[1], elbowL[2], handL[0], handL[1], handL[2], 0.048f, 0.85f, 0.60f, 0.42f);
+            drawLimb(0.10f, 1.30f + bob, bz, elbowL[0], elbowL[1], elbowL[2], 0.065f, 1.0f, 0.99f, 0.95f);
+            drawLimb(elbowL[0], elbowL[1], elbowL[2], handL[0], handL[1], handL[2], 0.056f, 0.85f, 0.60f, 0.42f);
             // bowling arm: shoulder -> elbow -> hand, windmilling over the top
             float[] hand = bowlerHand(armDeg, bz);
             float[] elbow = armPoint(0.62f, 1.32f + bob, bz, 0.40f, armDeg + 16f);
-            drawLimb(0.62f, 1.32f + bob, bz, elbow[0], elbow[1], elbow[2], 0.058f, 0.97f, 0.96f, 0.92f);
-            drawLimb(elbow[0], elbow[1], elbow[2], hand[0], hand[1], hand[2], 0.050f, 0.85f, 0.60f, 0.42f);
-            drawMesh(sphere, hand[0], hand[1], hand[2], 0.42f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
+            drawLimb(0.62f, 1.32f + bob, bz, elbow[0], elbow[1], elbow[2], 0.068f, 1.0f, 0.99f, 0.95f);
+            drawLimb(elbow[0], elbow[1], elbow[2], hand[0], hand[1], hand[2], 0.058f, 0.85f, 0.60f, 0.42f);
+            drawMesh(sphere, hand[0], hand[1], hand[2], 0.48f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
         }
 
         // =====================================================================
@@ -474,43 +530,44 @@ public class GlSceneView extends GLSurfaceView {
             float bx = model.batWorldX() * 0.55f;          // lateral guard shift
             float x = -0.75f + bx, z = 0.10f;
             float foot = model.getBatHeight() * 0.10f;     // front/back-foot shift
+            float a = BATSMAN_A;                            // slightly transparent
 
             drawBlob(x, z, 0.42f, 0.30f);
             float hipY = 0.82f;
             // bent legs: hip -> knee -> shoe, pads on the shins
-            drawLimb(x + 0.17f, hipY, z, x + 0.17f, 0.44f, z - 0.24f, 0.085f, 0.97f, 0.96f, 0.92f);
-            drawLimb(x + 0.17f, 0.44f, z - 0.24f, x + 0.17f + foot, 0.05f, z - 0.02f, 0.062f, 0.97f, 0.96f, 0.92f);
-            drawLimb(x - 0.17f, hipY, z, x - 0.17f, 0.44f, z + 0.10f, 0.085f, 0.97f, 0.96f, 0.92f);
-            drawLimb(x - 0.17f, 0.44f, z + 0.10f, x - 0.17f - foot * 0.5f, 0.05f, z + 0.14f, 0.062f, 0.97f, 0.96f, 0.92f);
-            drawLimb(x + 0.17f, 0.46f, z - 0.28f, x + 0.17f + foot, 0.06f, z - 0.06f, 0.088f, 0.99f, 0.98f, 0.95f);
-            drawLimb(x - 0.17f, 0.46f, z + 0.06f, x - 0.17f - foot * 0.5f, 0.06f, z + 0.10f, 0.088f, 0.99f, 0.98f, 0.95f);
-            drawBox(x + 0.17f + foot, 0.045f, z - 0.07f, 0.07f, 0.045f, 0.10f, 0.15f, 0.12f, 0.12f);
-            drawBox(x - 0.17f - foot * 0.5f, 0.045f, z + 0.05f, 0.07f, 0.045f, 0.10f, 0.15f, 0.12f, 0.12f);
+            drawLimbA(x + 0.17f, hipY, z, x + 0.17f, 0.44f, z - 0.24f, 0.085f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x + 0.17f, 0.44f, z - 0.24f, x + 0.17f + foot, 0.05f, z - 0.02f, 0.062f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x - 0.17f, hipY, z, x - 0.17f, 0.44f, z + 0.10f, 0.085f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x - 0.17f, 0.44f, z + 0.10f, x - 0.17f - foot * 0.5f, 0.05f, z + 0.14f, 0.062f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x + 0.17f, 0.46f, z - 0.28f, x + 0.17f + foot, 0.06f, z - 0.06f, 0.088f, 0.99f, 0.98f, 0.95f, a);
+            drawLimbA(x - 0.17f, 0.46f, z + 0.06f, x - 0.17f - foot * 0.5f, 0.06f, z + 0.10f, 0.088f, 0.99f, 0.98f, 0.95f, a);
+            drawBoxA(x + 0.17f + foot, 0.045f, z - 0.07f, 0.07f, 0.045f, 0.10f, 0.15f, 0.12f, 0.12f, a);
+            drawBoxA(x - 0.17f - foot * 0.5f, 0.045f, z + 0.05f, 0.07f, 0.045f, 0.10f, 0.15f, 0.12f, 0.12f, a);
             // torso leaning slightly forward
             float shX = x, shY = 1.22f, shZ = z - 0.07f;
-            drawLimb(x, hipY + 0.08f, z, shX, shY, shZ, 0.115f, 0.10f, 0.35f, 0.85f);
+            drawLimbA(x, hipY + 0.08f, z, shX, shY, shZ, 0.115f, 0.10f, 0.35f, 0.85f, a);
             // head + helmet dome + grille facing the bowler
             float hx = shX, hy = shY + 0.21f, hz = shZ - 0.02f;
-            drawMesh(sphere, hx, hy, hz, 0.60f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
-            drawMesh(sphere, hx, hy + 0.03f, hz, 0.66f, 0.10f, 0.35f, 0.85f, whiteTex, 1f);
-            drawBox(hx, hy - 0.02f, hz - 0.13f, 0.085f, 0.045f, 0.018f, 0.15f, 0.18f, 0.20f);
-            drawBox(hx - 0.05f, hy - 0.02f, hz - 0.13f, 0.012f, 0.045f, 0.018f, 0.15f, 0.18f, 0.20f);
-            drawBox(hx + 0.05f, hy - 0.02f, hz - 0.13f, 0.012f, 0.045f, 0.018f, 0.15f, 0.18f, 0.20f);
+            drawSphereA(hx, hy, hz, 0.60f, 0.85f, 0.60f, 0.42f, a);
+            drawSphereA(hx, hy + 0.03f, hz, 0.66f, 0.10f, 0.35f, 0.85f, a);
+            drawBoxA(hx, hy - 0.02f, hz - 0.13f, 0.085f, 0.045f, 0.018f, 0.15f, 0.18f, 0.20f, a);
+            drawBoxA(hx - 0.05f, hy - 0.02f, hz - 0.13f, 0.012f, 0.045f, 0.018f, 0.15f, 0.18f, 0.20f, a);
+            drawBoxA(hx + 0.05f, hy - 0.02f, hz - 0.13f, 0.012f, 0.045f, 0.018f, 0.15f, 0.18f, 0.20f, a);
 
             float t = 1f - sw;
             boolean idle = sw <= 0f;
             float[] pose = batPose(idle ? -1f : t, batAng, dir);
 
             // both arms reach to the bat handle; gloves on the grip
-            drawLimb(shX - 0.20f, shY - 0.02f, shZ, shX - 0.10f, pose[1] + 0.10f, pose[2] + 0.05f,
-                    0.05f, 0.10f, 0.35f, 0.85f);
-            drawLimb(shX - 0.10f, pose[1] + 0.10f, pose[2] + 0.05f, pose[0], pose[1], pose[2],
-                    0.045f, 0.85f, 0.60f, 0.42f);
-            drawLimb(shX + 0.20f, shY - 0.02f, shZ, shX + 0.12f, pose[1] + 0.16f, pose[2] + 0.02f,
-                    0.05f, 0.10f, 0.35f, 0.85f);
-            drawLimb(shX + 0.12f, pose[1] + 0.16f, pose[2] + 0.02f, pose[0], pose[1], pose[2],
-                    0.045f, 0.85f, 0.60f, 0.42f);
-            drawBox(pose[0], pose[1] + 0.02f, pose[2], 0.055f, 0.06f, 0.055f, 0.95f, 0.93f, 0.85f);
+            drawLimbA(shX - 0.20f, shY - 0.02f, shZ, shX - 0.10f, pose[1] + 0.10f, pose[2] + 0.05f,
+                    0.05f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(shX - 0.10f, pose[1] + 0.10f, pose[2] + 0.05f, pose[0], pose[1], pose[2],
+                    0.045f, 0.85f, 0.60f, 0.42f, a);
+            drawLimbA(shX + 0.20f, shY - 0.02f, shZ, shX + 0.12f, pose[1] + 0.16f, pose[2] + 0.02f,
+                    0.05f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(shX + 0.12f, pose[1] + 0.16f, pose[2] + 0.02f, pose[0], pose[1], pose[2],
+                    0.045f, 0.85f, 0.60f, 0.42f, a);
+            drawBoxA(pose[0], pose[1] + 0.02f, pose[2], 0.055f, 0.06f, 0.055f, 0.95f, 0.93f, 0.85f, a);
 
             // short 2-frame bat ghost during the swing only (the ball is never trailed)
             if (!idle) {
@@ -533,7 +590,7 @@ public class GlSceneView extends GLSurfaceView {
                 GLES20.glEnable(GLES20.GL_BLEND);
                 GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
                 Matrix.setIdentityM(m, 0);
-                Matrix.translateM(m, 0, model.batWorldX() * 0.55f, model.batWorldY(), 0.02f);
+                Matrix.translateM(m, 0, model.batWorldX(), model.batWorldY(), 0.02f);
                 Matrix.rotateM(m, 0, -90f, 1f, 0f, 0f);
                 Matrix.scaleM(m, 0, 0.30f, 0.30f, 1f);
                 drawMeshTexAlpha(ring, m, 0.84f, 1.0f, 0.40f, whiteTex, 0f, 0.55f);
@@ -550,21 +607,28 @@ public class GlSceneView extends GLSurfaceView {
         private float[] batPose(float t, float batAng, float dir) {
             float bwx = model.batWorldX();
             float batY = model.batWorldY();
+            // stance pivot: bat held DOWN on the striker's side (right-handed on
+            // screen after the mirror); hands rise/fall with the phone height axis
+            float stancePx = -0.88f + 0.55f * bwx;
+            float stancePy = clamp(batY, 0.60f, 1.30f);
             if (t < 0f) {
                 float bob = (float) Math.sin(clockS * 2.4f);
+                float py = stancePy + 0.02f * bob;
+                float phi = 168f - (py - 0.60f) / 0.70f * 16f; // toe down; steeper when low
                 return new float[]{
-                        0.55f * bwx - 0.10f,
-                        0.95f + 0.02f * bob,
+                        stancePx,
+                        py,
                         0.30f,
                         batAng * 0.85f + 4f * (float) Math.sin(clockS * 1.7f),
-                        165f + 3f * bob,
+                        phi + 3f * bob,
                         8f};
             }
             float ct = clamp01(t / 0.5f);
             float ft = clamp01((t - 0.5f) / 0.5f);
             float s = smooth(clamp01(t * 2f));
-            float px = lerp(0.55f * bwx - 0.10f, 0.55f * bwx + 0.02f * dir, s);
-            float py = lerp(0.95f, clamp(batY, 0.85f, 1.30f), s) + 0.10f * (1f - s) * (1f - s);
+            // the hands come across the body to the ball line at contact
+            float px = lerp(stancePx, 0.05f + bwx, s);
+            float py = lerp(stancePy, clamp(batY, 0.85f, 1.30f), s) + 0.10f * (1f - s) * (1f - s);
             float pz = lerp(0.30f, 0.42f, s);
             // aim the blade through the sweet-spot reticle at contact
             float phiC = (float) Math.toDegrees(Math.atan2(0.02f - pz, batY - py));
@@ -715,6 +779,19 @@ public class GlSceneView extends GLSurfaceView {
             Matrix.translateM(rotM, 0, wx, wy, wz);
             Matrix.rotateM(rotM, 0, spin, 0.86f, 0.12f, 0.5f);
             drawMeshTex(sphere, rotM, 1f, 1f, 1f, ballTex, 1f);
+
+            // pulsing ring around the live ball while it travels (per the design)
+            if (phase == BoundaryModel.Phase.BOWLING && live) {
+                GLES20.glEnable(GLES20.GL_BLEND);
+                GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+                float pulse = 0.55f + 0.30f * (float) Math.sin(clockS * 8f);
+                Matrix.setIdentityM(m, 0);
+                Matrix.translateM(m, 0, wx, wy, wz);
+                Matrix.rotateM(m, 0, -90f, 1f, 0f, 0f); // face the camera
+                Matrix.scaleM(m, 0, BALL_R * 2.6f, BALL_R * 2.6f, 1f);
+                drawMeshTexAlpha(ring, m, 0.84f, 1.0f, 0.40f, whiteTex, 0f, pulse);
+                GLES20.glDisable(GLES20.GL_BLEND);
+            }
 
             // dust puff + shock ring for 0.35 s after the pitch
             if (model.willBounce() && live) {
