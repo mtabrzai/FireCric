@@ -57,7 +57,7 @@ public class GlSceneView extends GLSurfaceView {
         private final Context ctx;
         private int program;
         private int bgTex, turfTex, pitchTex, whiteTex, ballTex;
-        private Mesh cube, sphere, cyl, ring;
+        private Mesh cube, sphere, cyl, ring, rope;
         private int aPos, aNormal, aTex;
         private int uVP, uModel, uColor, uTex, uUseTex, uLightDir;
         private float[] proj = new float[16];
@@ -121,6 +121,7 @@ public class GlSceneView extends GLSurfaceView {
             sphere = Mesh.uvSphere(BALL_R, 16, 12);
             cyl = Mesh.cylinder(1f, 1f, 12); // unit cylinder, scaled to size per part
             ring = Mesh.ring(0.36f, 0.42f, 24);
+            rope = Mesh.ring(BoundaryModel.BOUNDARY_M - 0.4f, BoundaryModel.BOUNDARY_M + 0.4f, 72);
             bgTex = loadTex(R.drawable.bg_stadium);
             turfTex = texBitmap(turfBitmap());
             pitchTex = texBitmap(pitchBitmap());
@@ -165,6 +166,7 @@ public class GlSceneView extends GLSurfaceView {
             drawBackground();
             drawTurf();
             drawPitch();
+            drawBoundary();
             drawFielders();
 
             BoundaryModel.Phase phase = model.getPhase();
@@ -176,7 +178,6 @@ public class GlSceneView extends GLSurfaceView {
             drawStumps(+BoundaryModel.STUMP_Z, Math.max(model.getStumpAnim(), hitKnock));
             drawStumps(BoundaryModel.RELEASE_Z, 0f);
             drawKeeper();
-            drawUmpire();
 
             if (phase != prevPhase) {
                 prevPhase = phase;
@@ -203,7 +204,19 @@ public class GlSceneView extends GLSurfaceView {
             float batAng = model.getBatAngle();
             float sw = model.getSwing();
             float dir = model.getSwingDir();
-            drawBatsman(batAng, sw, dir, phase);
+            // two batsmen: while RUNNING they shuttle between the wickets
+            float strikerZ = 0.10f, nonStrikerZ = -17.5f;
+            float legs = model.runLegs();
+            if (legs > 0f) {
+                int done = (int) Math.floor(legs);
+                float f = legs - done;
+                float a0 = done % 2 == 0 ? 0.10f : -17.5f;
+                float a1 = done % 2 == 0 ? -17.5f : 0.10f;
+                strikerZ = lerp(a0, a1, f);
+                nonStrikerZ = lerp(a1, a0, f);
+            }
+            drawBatsman(batAng, sw, dir, phase, strikerZ);
+            drawNonStriker(nonStrikerZ);
 
             if (phase != BoundaryModel.Phase.LOBBY && phase != BoundaryModel.Phase.READY) {
                 drawTargetRing();
@@ -280,11 +293,21 @@ public class GlSceneView extends GLSurfaceView {
         }
 
         private void drawTurf() {
-            // mowed outfield: wide plane from behind the batsman deep past the bowler
+            // mowed outfield out past the boundary rope
             Matrix.setIdentityM(m, 0);
-            Matrix.translateM(m, 0, 0f, 0f, -20f);
-            Matrix.scaleM(m, 0, 60f, 1f, 62f);
+            Matrix.translateM(m, 0, 0f, 0f, -55f);
+            Matrix.scaleM(m, 0, 170f, 1f, 180f);
             drawMeshTexAlpha(Mesh.quad(), m, 1f, 1f, 1f, turfTex, 1f, 1f);
+        }
+
+        /** The boundary rope: a clear white ring at 68 m. */
+        private void drawBoundary() {
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            Matrix.setIdentityM(m, 0);
+            Matrix.translateM(m, 0, 0f, 0.02f, 0f);
+            drawMeshTexAlpha(rope, m, 0.97f, 0.97f, 0.92f, whiteTex, 0f, 0.85f);
+            GLES20.glDisable(GLES20.GL_BLEND);
         }
 
         private void drawPitch() {
@@ -397,16 +420,65 @@ public class GlSceneView extends GLSurfaceView {
         }
 
         // =====================================================================
-        // Fielders spread around the outfield ("here and there")
+        // Fielders spread around the outfield; the nearest one chases the ball
         // =====================================================================
+        private final float[][] FIELDER_BASE = {
+                {-4.5f, -10f}, {3.0f, -13f}, {-7.5f, -22f}, {6.5f, -25f},
+                {-2.5f, -31f}, {9.0f, -17f}, {-10.5f, -15f}};
+        private final float[][] FIELDER_COL = {
+                {0.10f, 0.30f, 0.80f}, {0.55f, 0.12f, 0.18f}, {0.95f, 0.95f, 0.93f},
+                {0.10f, 0.30f, 0.80f}, {0.55f, 0.12f, 0.18f}, {0.95f, 0.95f, 0.93f},
+                {0.10f, 0.30f, 0.80f}};
+        private final float[][] fielderPos = new float[FIELDER_BASE.length][2];
+        private boolean fieldersInit;
+
         private void drawFielders() {
-            drawFielder(-4.5f, -10f, 0.10f, 0.30f, 0.80f);
-            drawFielder(3.0f, -13f, 0.55f, 0.12f, 0.18f);
-            drawFielder(-7.5f, -22f, 0.95f, 0.95f, 0.93f);
-            drawFielder(6.5f, -25f, 0.10f, 0.30f, 0.80f);
-            drawFielder(-2.5f, -31f, 0.55f, 0.12f, 0.18f);
-            drawFielder(9.0f, -17f, 0.95f, 0.95f, 0.93f);
-            drawFielder(-10.5f, -15f, 0.10f, 0.30f, 0.80f);
+            if (!fieldersInit) {
+                for (int i = 0; i < FIELDER_BASE.length; i++) {
+                    fielderPos[i][0] = FIELDER_BASE[i][0];
+                    fielderPos[i][1] = FIELDER_BASE[i][1];
+                }
+                fieldersInit = true;
+            }
+            BoundaryModel.Phase ph = model.getPhase();
+            boolean chase = ph == BoundaryModel.Phase.FLYING;
+            boolean reset = ph == BoundaryModel.Phase.RUNUP || ph == BoundaryModel.Phase.READY
+                    || ph == BoundaryModel.Phase.LOBBY;
+            float tx = 0f, tz = 0f;
+            if (chase) {
+                tx = clamp(model.flyX, -30f, 30f);
+                tz = clamp(model.flyZ, -60f, 5f);
+            }
+            int nearest = 0;
+            float best = Float.MAX_VALUE;
+            for (int i = 0; i < fielderPos.length; i++) {
+                float dx = fielderPos[i][0] - tx, dz = fielderPos[i][1] - tz;
+                float d2 = dx * dx + dz * dz;
+                if (d2 < best) {
+                    best = d2;
+                    nearest = i;
+                }
+            }
+            for (int i = 0; i < fielderPos.length; i++) {
+                float gx, gz, k;
+                if (chase && i == nearest) {
+                    gx = tx;
+                    gz = tz;
+                    k = 0.10f; // sprint to the ball
+                } else if (reset) {
+                    gx = FIELDER_BASE[i][0];
+                    gz = FIELDER_BASE[i][1];
+                    k = 0.2f;  // drift back to his mark between balls
+                } else {
+                    gx = fielderPos[i][0];
+                    gz = fielderPos[i][1];
+                    k = 0f;
+                }
+                fielderPos[i][0] += (gx - fielderPos[i][0]) * k;
+                fielderPos[i][1] += (gz - fielderPos[i][1]) * k;
+                drawFielder(fielderPos[i][0], fielderPos[i][1],
+                        FIELDER_COL[i][0], FIELDER_COL[i][1], FIELDER_COL[i][2]);
+            }
         }
 
         /** Fielder in a ready stance: knees bent, hands resting on the knees. */
@@ -424,18 +496,21 @@ public class GlSceneView extends GLSurfaceView {
         }
 
         // =====================================================================
-        // Umpire: standing behind the batting stumps, white coat + hat
+        // Non-striker: waiting at the bowling end with his bat down
         // =====================================================================
-        private void drawUmpire() {
-            float ux = 1.15f, uz = 2.0f;
-            drawBlob(ux, uz, 0.35f, 0.28f);
-            drawLimb(ux - 0.12f, 0.90f, uz, ux - 0.12f, 0.05f, uz, 0.06f, 0.12f, 0.13f, 0.15f);
-            drawLimb(ux + 0.12f, 0.90f, uz, ux + 0.12f, 0.05f, uz, 0.06f, 0.12f, 0.13f, 0.15f);
-            drawBox(ux, 1.28f, uz, 0.17f, 0.40f, 0.11f, 0.90f, 0.90f, 0.92f);
-            drawLimb(ux - 0.20f, 1.24f, uz, ux - 0.26f, 0.92f, uz, 0.045f, 0.90f, 0.90f, 0.92f);
-            drawLimb(ux + 0.20f, 1.24f, uz, ux + 0.26f, 0.92f, uz, 0.045f, 0.90f, 0.90f, 0.92f);
-            drawMesh(sphere, ux, 1.68f, uz, 0.55f, 0.85f, 0.60f, 0.42f, whiteTex, 1f);
-            drawBox(ux, 1.78f, uz, 0.11f, 0.045f, 0.11f, 0.95f, 0.95f, 0.95f);
+        private void drawNonStriker(float z) {
+            float x = 0.55f;
+            float a = 1f;
+            drawBlob(x, z, 0.36f, 0.26f);
+            drawLimbA(x - 0.12f, 0.88f, z, x - 0.12f, 0.05f, z, 0.06f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x + 0.12f, 0.88f, z, x + 0.12f, 0.05f, z, 0.06f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x, 0.88f, z, x, 1.30f, z, 0.11f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x - 0.19f, 1.26f, z, x - 0.24f, 0.95f, z, 0.045f, 0.10f, 0.35f, 0.85f, a);
+            drawLimbA(x + 0.19f, 1.26f, z, x + 0.24f, 0.95f, z, 0.045f, 0.10f, 0.35f, 0.85f, a);
+            // bat resting on the ground, toe down
+            drawLimbA(x + 0.28f, 0.95f, z, x + 0.38f, 0.05f, z + 0.05f, 0.018f, 0.96f, 0.88f, 0.72f, a);
+            drawSphereA(x, 1.50f, z, 0.58f, 0.85f, 0.60f, 0.42f, a);
+            drawSphereA(x, 1.53f, z, 0.64f, 0.10f, 0.35f, 0.85f, a);
         }
 
         // =====================================================================
@@ -542,9 +617,8 @@ public class GlSceneView extends GLSurfaceView {
         // by the stumps; swing = backlift -> smash through the sweet spot ->
         // follow-through (never a full rotation).
         // =====================================================================
-        private void drawBatsman(float batAng, float sw, float dir, BoundaryModel.Phase phase) {
-            float bx = model.batWorldX() * 0.55f;          // lateral guard shift
-            float x = -0.75f + bx, z = 0.10f;
+        private void drawBatsman(float batAng, float sw, float dir, BoundaryModel.Phase phase, float z) {
+            float x = -0.75f;                              // the batsman is stable
             float foot = model.getBatHeight() * 0.10f;     // front/back-foot shift
             float a = BATSMAN_A;                            // slightly transparent
 
@@ -624,8 +698,9 @@ public class GlSceneView extends GLSurfaceView {
             float bwx = model.batWorldX();
             float batY = model.batWorldY();
             // stance pivot: bat held DOWN on the striker's side (right-handed on
-            // screen after the mirror); hands rise/fall with the phone height axis
-            float stancePx = -0.88f + 0.55f * bwx;
+            // screen after the mirror; left-handed mirrors to the other side);
+            // hands rise/fall with the phone height axis
+            float stancePx = (model.isLeftHanded() ? -0.62f : -0.88f) + 0.55f * bwx;
             float stancePy = clamp(batY, 0.60f, 1.30f);
             if (t < 0f) {
                 float bob = (float) Math.sin(clockS * 2.4f);
@@ -819,6 +894,17 @@ public class GlSceneView extends GLSurfaceView {
             Matrix.translateM(rotM, 0, wx, wy, wz);
             Matrix.rotateM(rotM, 0, spin, 0.86f, 0.12f, 0.5f);
             drawMeshTex(sphere, rotM, 1f, 1f, 1f, ballTex, 1f);
+
+            // where the ball is going: a ground marker under the flight
+            if (flying) {
+                GLES20.glEnable(GLES20.GL_BLEND);
+                GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+                Matrix.setIdentityM(m, 0);
+                Matrix.translateM(m, 0, wx, 0.015f, wz);
+                Matrix.scaleM(m, 0, 0.38f, 0.38f, 1f);
+                drawMeshTexAlpha(ring, m, 0.84f, 1.0f, 0.40f, whiteTex, 0f, 0.5f);
+                GLES20.glDisable(GLES20.GL_BLEND);
+            }
 
             // pulsing ring around the live ball while it travels (per the design)
             if (phase == BoundaryModel.Phase.BOWLING && live) {

@@ -54,13 +54,20 @@ def main():
     tier(int(H * 0.20), int(H * 0.42), (24, 46, 42), 235)   # upper tier
     tier(int(H * 0.30), int(H * 0.50), (30, 58, 52), 255)   # lower tier
 
-    # crowd shimmer: tiny dots across the tiers
-    for _ in range(5200):
+    # crowd: dense packed stands — rows of spectator dots across both tiers,
+    # brighter and more varied so the stadium clearly reads as full of people
+    for _ in range(26000):
         x = random.uniform(0, W)
-        yy = random.uniform(H * 0.21, H * 0.49)
-        v = random.randint(70, 200)
-        col = (v, v, v * 92 // 100) if random.random() < 0.5 else (v, v, int(v * 0.7))
-        draw.point((x, yy), fill=col + (random.randint(30, 110),))
+        yy = random.uniform(H * 0.205, H * 0.50)
+        v = random.randint(90, 235)
+        r = random.random()
+        if r < 0.45:
+            col = (v, v, v)                                  # whites/greys
+        elif r < 0.7:
+            col = (v, int(v * 0.75), int(v * 0.45))          # warm colours
+        else:
+            col = (int(v * 0.55), int(v * 0.8), v)           # blues
+        draw.point((x, yy), fill=col + (random.randint(90, 190),))
 
     # roofline over the top tier
     steps = 64

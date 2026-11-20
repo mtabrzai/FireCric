@@ -47,6 +47,7 @@ public class MainActivity extends Activity
     private long lastStateMs;
     private Vibrator vibrator;
     private boolean codeRejected; // TV refused our pairing code
+    private boolean handLeft;     // striker handedness shown on the phone
 
     // last pushed state for the reconnect card
     private String lastScore = "0 / 0";
@@ -242,9 +243,18 @@ public class MainActivity extends Activity
                 } else if ("PAUSED".equals(lastScreen)) {
                     ui.setPrimary("RESUME INNINGS", true);
                     ui.setSecondary("BACK TO LOBBY", true);
+                } else if ("FLYING".equals(lastScreen) || "RUNNING".equals(lastScreen)) {
+                    boolean canRun = !"false".equals(kv.get("canRun"));
+                    ui.setPrimary(canRun ? "RUN +1" : "WATCH", canRun);
+                    ui.setSecondary("PAUSE GAME", true);
                 } else {
                     ui.setPrimary("SWING", true);
                     ui.setSecondary("PAUSE GAME", true);
+                }
+                String hand = kv.get("hand");
+                if (hand != null) {
+                    handLeft = "L".equals(hand);
+                    ui.setHand(handLeft);
                 }
             }
         });
@@ -396,6 +406,10 @@ public class MainActivity extends Activity
         } else if ("assist".equals(action)) {
             ui.setAssist(!ui.isAssistOn());
             client.send(ui.isAssistOn() ? "ASSIST\t1" : "ASSIST\t0");
+        } else if ("hand".equals(action)) {
+            handLeft = !handLeft;
+            ui.setHand(handLeft);
+            client.send(handLeft ? "HAND\tL" : "HAND\tR");
         } else if ("primary".equals(action)) {
             sendPrimary();
         } else if ("second".equals(action)) {
@@ -418,6 +432,9 @@ public class MainActivity extends Activity
         String label = ui.getPrimaryLabel();
         if ("SWING".equals(label)) {
             client.send("SWING");
+            buzz(25);
+        } else if ("RUN +1".equals(label)) {
+            client.send("RUN");
             buzz(25);
         } else if ("START INNINGS".equals(label)) {
             client.send("START");

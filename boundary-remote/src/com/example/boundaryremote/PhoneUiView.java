@@ -61,6 +61,7 @@ public class PhoneUiView extends View {
     private boolean primaryLime = true;
     private float batLine, batHeight;
     private boolean assistOn = true;
+    private boolean handLeft;
     private String secondLabel = "PAUSE GAME";
     private boolean hasSecond = true;
 
@@ -165,6 +166,10 @@ public class PhoneUiView extends View {
 
     public String getSecondaryLabel() {
         return secondLabel;
+    }
+
+    public void setHand(boolean left) {
+        handLeft = left;
     }
 
     public boolean isAssistOn() {
@@ -372,9 +377,10 @@ public class PhoneUiView extends View {
         caps(c, "LOW · YORKER", 246, gy + 166, 10f, batHeight < -0.33f ? LIME : MUTED);
         text(c, "Swing through the ball", 40, 374, reg, 13f, MUTED);
 
-        // Smart Assist row
+        // row: handedness toggle (left) + Smart Assist switch (right)
         panel(c, 24, 412, 342, 48, PANEL);
-        caps(c, "SMART ASSIST", 40, 442, 12f, MUTED);
+        caps(c, handLeft ? "HAND: L" : "HAND: R", 40, 442, 12f, handLeft ? CORAL : LIME);
+        caps(c, "ASSIST", 218, 442, 12f, MUTED);
         p.setColor(assistOn ? LIME : DIV);
         r.set(312, 426, 350, 446);
         c.drawRoundRect(r, 10f, 10f, p);
@@ -448,7 +454,10 @@ public class PhoneUiView extends View {
                 return "calibrated";
             }
         } else if (SCREEN_PLAY.equals(screen)) {
-            if (y >= 412 && y <= 460 && x >= 240 && x <= 366) {
+            if (y >= 412 && y <= 460 && x >= 24 && x <= 210) {
+                return "hand";
+            }
+            if (y >= 412 && y <= 460 && x >= 210 && x <= 366) {
                 return "assist";
             }
             if (y >= 660 && y <= 756 && x >= 24 && x <= 366) {

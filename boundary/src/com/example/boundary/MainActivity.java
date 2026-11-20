@@ -241,6 +241,14 @@ public class MainActivity extends Activity implements SessionServer.Listener {
             model.setAssist(!"0".equals(msg[1]));
             return;
         }
+        if (Protocol.isRun(verb)) {
+            model.requestRun();
+            return;
+        }
+        if (Protocol.isHand(verb) && msg.length >= 2) {
+            model.setLeftHanded("L".equalsIgnoreCase(msg[1]));
+            return;
+        }
         // CALIBRATING / CALIBRATED: no TV-side action needed beyond state push
     }
 

@@ -187,6 +187,16 @@ public final class Protocol {
         return "ASSIST".equals(verb);
     }
 
+    /** RUN: attempt one more run between the wickets while the ball is in play. */
+    public static boolean isRun(String verb) {
+        return "RUN".equals(verb);
+    }
+
+    /** HAND\tL|R: choose left- or right-handed batsman. */
+    public static boolean isHand(String verb) {
+        return "HAND".equals(verb);
+    }
+
     private Protocol() {
     }
 }
