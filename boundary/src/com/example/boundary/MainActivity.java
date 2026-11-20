@@ -31,7 +31,17 @@ public class MainActivity extends Activity implements SessionServer.Listener {
     private HudView hud;
     private SessionServer server;
 
-    private final ConcurrentLinkedQueue<String[]> commands = new ConcurrentLinkedQueue<String[]>();
+    private static class Cmd {
+        final String[] msg;
+        final int slot;
+
+        Cmd(String[] m, int s) {
+            msg = m;
+            slot = s;
+        }
+    }
+
+    private final ConcurrentLinkedQueue<Cmd> commands = new ConcurrentLinkedQueue<Cmd>();
     private Thread loop;
     private volatile boolean running;
 
@@ -175,37 +185,49 @@ public class MainActivity extends Activity implements SessionServer.Listener {
     }
 
     private void drainCommands() {
-        String[] msg;
-        while ((msg = commands.poll()) != null) {
-            handle(msg);
+        Cmd c;
+        while ((c = commands.poll()) != null) {
+            handle(c.msg, c.slot);
         }
     }
 
-    private void handle(String[] msg) {
+    private void handle(String[] msg, int slot) {
         if (msg == null || msg.length == 0) {
             return;
         }
         String verb = msg[0];
+        // in 2P only the phone whose batsman is on strike operates the bat
+        boolean canBat = model.getPlayers() == 1 || slot == model.getStrikerSlot() - 1;
         if (Protocol.isPing(verb)) {
             return; // the session layer answers PING itself
         }
         if (Protocol.isTilt(verb) && msg.length >= 2) {
-            float line = clampLine(Float.parseFloat(msg[1]));
-            float height = msg.length >= 3 ? clampHeight(Float.parseFloat(msg[2])) : 0f;
-            model.setBatPose(line, height);
+            if (canBat) {
+                float line = clampLine(Float.parseFloat(msg[1]));
+                float height = msg.length >= 3 ? clampHeight(Float.parseFloat(msg[2])) : 0f;
+                model.setBatPose(line, height);
+            }
             return;
         }
         if (Protocol.isSwing(verb)) {
             if (inPlay()) {
-                model.strike();
+                if (canBat) {
+                    model.strike();
+                }
             } else {
                 activateFocused();
             }
             return;
         }
+        if (Protocol.isRun(verb)) {
+            if (canBat) {
+                model.requestRun();
+            }
+            return;
+        }
         if (Protocol.isStart(verb)) {
-            if (model.getPhase() == BoundaryModel.Phase.LOBBY
-                    || model.getPhase() == BoundaryModel.Phase.READY) {
+            if ((model.getPhase() == BoundaryModel.Phase.LOBBY
+                    || model.getPhase() == BoundaryModel.Phase.READY) && startAllowed()) {
                 model.startInnings();
             }
             return;
@@ -241,6 +263,10 @@ public class MainActivity extends Activity implements SessionServer.Listener {
             model.setAssist(!"0".equals(msg[1]));
             return;
         }
+        if (Protocol.isHand(verb) && msg.length >= 2) {
+            model.setLeftHanded("L".equalsIgnoreCase(msg[1]));
+            return;
+        }
         // CALIBRATING / CALIBRATED: no TV-side action needed beyond state push
     }
 
@@ -248,6 +274,14 @@ public class MainActivity extends Activity implements SessionServer.Listener {
         BoundaryModel.Phase p = model.getPhase();
         return p == BoundaryModel.Phase.RUNUP || p == BoundaryModel.Phase.BOWLING
                 || p == BoundaryModel.Phase.FLYING;
+    }
+
+    /** In 2P the innings only opens once BOTH players are connected to the TV. */
+    private boolean startAllowed() {
+        if (model.getPlayers() == 2) {
+            return server != null && server.modeSatisfied();
+        }
+        return true; // 1P (or TV-only D-pad play)
     }
 
     private static float clampLine(float d) {
@@ -288,13 +322,30 @@ public class MainActivity extends Activity implements SessionServer.Listener {
     // =====================================================================
     @Override
     public void onCommand(String[] msg) {
-        commands.offer(msg);
+        onCommand(msg, 0);
+    }
+
+    @Override
+    public void onCommand(String[] msg, int slot) {
+        commands.offer(new Cmd(msg, slot));
     }
 
     @Override
     public void onBatConnected(String phoneName) {
-        hud.setPhone(phoneName);
-        if (model.getPhase() == BoundaryModel.Phase.LOBBY) {
+        onBatConnected(phoneName, 0);
+    }
+
+    @Override
+    public void onBatLost() {
+        onBatLost(0);
+    }
+
+    @Override
+    public void onBatConnected(String phoneName, int slot) {
+        model.setPlayers(server != null && server.mode() == 2 ? 2 : 1);
+        hud.setPhone(server == null ? null : server.batName());
+        if (model.getPhase() == BoundaryModel.Phase.LOBBY
+                && (model.getPlayers() == 1 || (server != null && server.modeSatisfied()))) {
             model.ready();
         }
         if (model.getPhase() == BoundaryModel.Phase.PAUSED) {
@@ -304,10 +355,14 @@ public class MainActivity extends Activity implements SessionServer.Listener {
     }
 
     @Override
-    public void onBatLost() {
-        hud.setPhone(null);
+    public void onBatLost(int slot) {
+        hud.setPhone(server == null ? null : server.batName());
         if (inPlay()) {
             model.pause(); // current delivery is not counted
+        }
+        if (model.getPhase() == BoundaryModel.Phase.READY && model.getPlayers() == 2
+                && !(server != null && server.modeSatisfied())) {
+            model.backToLobby(); // 2P: the game waits for both players
         }
         hud.postInvalidate();
     }

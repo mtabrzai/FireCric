@@ -61,6 +61,9 @@ public class PhoneUiView extends View {
     private boolean primaryLime = true;
     private float batLine, batHeight;
     private boolean assistOn = true;
+    private boolean handLeft;
+    private int mode = 1;  // 1 or 2 players
+    private int slot = 1;  // P1 or P2 when mode == 2
     private String secondLabel = "PAUSE GAME";
     private boolean hasSecond = true;
 
@@ -165,6 +168,15 @@ public class PhoneUiView extends View {
 
     public String getSecondaryLabel() {
         return secondLabel;
+    }
+
+    public void setHand(boolean left) {
+        handLeft = left;
+    }
+
+    public void setMode(int m, int s) {
+        mode = m == 2 ? 2 : 1;
+        slot = s == 2 ? 2 : 1;
     }
 
     public boolean isAssistOn() {
@@ -283,7 +295,17 @@ public class PhoneUiView extends View {
         boolean ready = tvFound && code.length() == 6;
         pillRect(c, "CONNECT TO TV", 24, 540, 342, 56, true, ready);
         text(c, "Need help connecting?", 24, 632, semi, 15f, MUTED);
-        text(c, "Boundary on Fire TV · protocol v3", 24, 800, reg, 12f, 0x80AEBFB7);
+
+        // player mode: 1P or 2P (+ P1/P2 slot when 2P)
+        caps(c, "PLAYERS", 24, 664, 11f, MUTED);
+        pillRect(c, "1 PLAYER", 24, 678, 164, 44, mode == 1, true);
+        pillRect(c, "2 PLAYERS", 202, 678, 164, 44, mode == 2, true);
+        if (mode == 2) {
+            caps(c, "YOU ARE", 24, 748, 11f, MUTED);
+            pillRect(c, "PLAYER 1", 24, 762, 164, 44, slot == 1, true);
+            pillRect(c, "PLAYER 2", 202, 762, 164, 44, slot == 2, true);
+        }
+        text(c, "Boundary on Fire TV · protocol v3", 24, 836, reg, 11f, 0x80AEBFB7);
     }
 
     // --------------------------------------------------------------- calibrate
@@ -372,9 +394,10 @@ public class PhoneUiView extends View {
         caps(c, "LOW · YORKER", 246, gy + 166, 10f, batHeight < -0.33f ? LIME : MUTED);
         text(c, "Swing through the ball", 40, 374, reg, 13f, MUTED);
 
-        // Smart Assist row
+        // row: handedness toggle (left) + Smart Assist switch (right)
         panel(c, 24, 412, 342, 48, PANEL);
-        caps(c, "SMART ASSIST", 40, 442, 12f, MUTED);
+        caps(c, handLeft ? "HAND: L" : "HAND: R", 40, 442, 12f, handLeft ? CORAL : LIME);
+        caps(c, "ASSIST", 218, 442, 12f, MUTED);
         p.setColor(assistOn ? LIME : DIV);
         r.set(312, 426, 350, 446);
         c.drawRoundRect(r, 10f, 10f, p);
@@ -443,12 +466,27 @@ public class PhoneUiView extends View {
             if (y >= 616 && y <= 648 && x >= 24 && x <= 260) {
                 return "help";
             }
+            if (y >= 678 && y <= 722 && x >= 24 && x <= 188) {
+                return "mode1";
+            }
+            if (y >= 678 && y <= 722 && x >= 202 && x <= 366) {
+                return "mode2";
+            }
+            if (mode == 2 && y >= 762 && y <= 806 && x >= 24 && x <= 188) {
+                return "slot1";
+            }
+            if (mode == 2 && y >= 762 && y <= 806 && x >= 202 && x <= 366) {
+                return "slot2";
+            }
         } else if (SCREEN_CALIBRATE.equals(screen)) {
             if (y >= 700 && y <= 756 && x >= 24 && x <= 366 && calProgress >= 1f) {
                 return "calibrated";
             }
         } else if (SCREEN_PLAY.equals(screen)) {
-            if (y >= 412 && y <= 460 && x >= 240 && x <= 366) {
+            if (y >= 412 && y <= 460 && x >= 24 && x <= 210) {
+                return "hand";
+            }
+            if (y >= 412 && y <= 460 && x >= 210 && x <= 366) {
                 return "assist";
             }
             if (y >= 660 && y <= 756 && x >= 24 && x <= 366) {

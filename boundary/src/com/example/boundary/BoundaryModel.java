@@ -27,7 +27,7 @@ import java.util.Random;
  */
 public class BoundaryModel {
 
-    public enum Phase {LOBBY, READY, RUNUP, BOWLING, FLYING, BOWLED, RESULT, GAME_OVER, PAUSED}
+    public enum Phase {LOBBY, READY, RUNUP, BOWLING, FLYING, RUNNING, BOWLED, RESULT, GAME_OVER, PAUSED}
 
     // ---- format ----
     public static final int MAX_BALLS = 30;      // 5 overs x 6 balls
@@ -112,6 +112,23 @@ public class BoundaryModel {
     public float swingDir = 1f;
     private boolean smartAssist = true;
 
+    // ---- handedness: right by default, ~15% left per innings unless chosen ----
+    private boolean leftHanded;
+    private boolean handednessLocked;
+
+    // ---- running between the wickets (two batsmen) ----
+    private static final float RUN_MS = 750f;   // one completed length per 750 ms
+    private float runTimer;
+    private int targetRuns;
+    private int pendingRuns;                     // RUN pressed during the flight
+    private float fielderMs;                     // when the chasing fielder reaches the ball
+    public boolean boundaryHit;                  // 4/6: automatic, no running
+    private String shot;
+
+    // ---- players: 1 phone operates both batsmen; 2 phones alternate strike ----
+    private int players = 1;
+    private int strikerSlot = 1;                 // 1-based slot currently on strike
+
     // ---- innings ----
     public int runs, wickets, balls;
     public boolean gameOver;
@@ -173,6 +190,67 @@ public class BoundaryModel {
         phase = Phase.LOBBY;
         pausedFrom = Phase.LOBBY;
         phaseTimer = 0;
+        runTimer = 0f;
+        targetRuns = 1;
+        pendingRuns = 0;
+        fielderMs = 1200f;
+        boundaryHit = false;
+        shot = "";
+        if (!handednessLocked) {
+            leftHanded = random.nextFloat() < 0.15f; // most batsmen right-handed
+        }
+    }
+
+    /** Choose the striker's handedness (locks the random per-innings pick). */
+    public synchronized void setLeftHanded(boolean left) {
+        leftHanded = left;
+        handednessLocked = true;
+    }
+
+    public synchronized boolean isLeftHanded() {
+        return leftHanded;
+    }
+
+    /** Phone RUN: attempt one more run between the wickets (max 3). */
+    public synchronized void requestRun() {
+        if (phase == Phase.RUNNING) {
+            targetRuns = Math.min(3, targetRuns + 1);
+        } else if (phase == Phase.FLYING && !boundaryHit) {
+            pendingRuns++;
+        }
+    }
+
+    /** Animation progress in completed "legs" (0, 1, 2, 3...) while RUNNING. */
+    public synchronized float runLegs() {
+        return phase == Phase.RUNNING ? runTimer / RUN_MS : 0f;
+    }
+
+    public synchronized int getTargetRuns() {
+        return targetRuns;
+    }
+
+    public synchronized String getShotName() {
+        return shot == null ? "" : shot;
+    }
+
+    public synchronized void setPlayers(int n) {
+        players = n == 2 ? 2 : 1;
+    }
+
+    public synchronized int getPlayers() {
+        return players;
+    }
+
+    /** Which phone (1-based slot) is on strike right now. */
+    public synchronized int getStrikerSlot() {
+        return strikerSlot;
+    }
+
+    /** After odd runs or at the end of an over, the strike rotates (2P only). */
+    private void rotateStrike() {
+        if (players == 2 && (balls % 6 == 0 || lastRuns % 2 == 1)) {
+            strikerSlot = strikerSlot == 1 ? 2 : 1;
+        }
     }
 
     /** Phone paired -> wait on the READY screen for Start innings. */
@@ -484,31 +562,93 @@ public class BoundaryModel {
     private void registerHit(float dist, String tLabel, float loft, boolean manual) {
         lastWicket = false;
         lastBowled = false;
-        lastRuns = bandRuns(dist);
-        runs += lastRuns;
-        balls++;
-        ballLog.add(lastRuns == 0 ? "0" : String.valueOf(lastRuns));
         distM = Math.round(dist);
-        dirDeg = (int) clamp(90f + getBatAngle() * 0.75f + (random.nextFloat() - 0.5f) * 14f, 30f, 150f);
+        // front 180° only: the shot always goes in the forward hemisphere
+        dirDeg = (int) clamp(90f + getBatAngle() * 0.75f + (random.nextFloat() - 0.5f) * 14f, 5f, 175f);
         timingLabel = tLabel;
-        resultTitle = headlineFor(lastRuns);
-        resultKicker = lastRuns >= 4 ? "WHAT A SHOT" : "NICELY PLAYED";
-        resultSub = lastRuns == 6 ? "Over the rope. Into the stands."
-                : lastRuns == 4 ? "Raced away to the fence."
-                : "Into the gap.";
-        swing = 1f;
-        checkInningsEnd();
+        int band = bandRuns(dist);
+        shot = shotNameFor(band, loft);
+        // a FOUR bounces before the boundary rope and then goes; a SIX clears it
+        boundaryHit = dist >= 44f;
         flyFromX = ballWorldX(1f);
         flyFromY = ballWorldY(1f);
-        flyApex = 1.6f + loft * 7.5f + (lastRuns == 6 ? 2.5f : 0f);
-        flyDur = 1.5f + Math.min(0.7f, dist / BOUNDARY_M * 1.4f);
+        flyApex = 1.6f + loft * 7.5f + (band == 6 ? 2.5f : 0f);
+        flyDur = boundaryHit ? 1.5f + Math.min(0.7f, dist / BOUNDARY_M * 1.4f) : 0.9f;
         flyT = 0f;
         ballLive = false;
         flyX = flyFromX;
         flyY = flyFromY;
         flyZ = 0f;
+        swing = 1f;
+        if (boundaryHit) {
+            // 4/6 are automatic: no running between the wickets
+            lastRuns = band;
+            runs += lastRuns;
+            balls++;
+            ballLog.add(String.valueOf(lastRuns));
+            resultTitle = headlineFor(lastRuns);
+            resultKicker = "WHAT A SHOT";
+            resultSub = shot + (lastRuns == 6 ? " · over the rope on the full"
+                    : " · bounced before the rope") + " · " + distM + " m";
+            checkInningsEnd();
+            rotateStrike();
+        } else {
+            // ball in play: the batsmen run. The single is the default; each RUN
+            // press adds one more (max 3, and 3 is automatic on a deep gap); the
+            // chasing fielder cuts the runs short if the ball is close
+            targetRuns = dist < 16f ? 1 : dist < 30f ? 2 : 3;
+            targetRuns = Math.min(3, targetRuns + pendingRuns);
+            pendingRuns = 0;
+            runTimer = 0f;
+            fielderMs = clamp(550f + dist * 30f, 600f, 1900f);
+        }
         phase = Phase.FLYING;
         phaseTimer = 0;
+    }
+
+    /** Front-180° shot names, mapped from the delivery and the shot direction. */
+    private String shotNameFor(int band, float loft) {
+        String d = delivery;
+        if ("SHORT".equals(d)) {
+            return "PULL";
+        }
+        if ("SPIN".equals(OVER_NAMES[getOverIndex()])) {
+            return loft > 0.6f ? "SLOG SWEEP" : "SWEEP";
+        }
+        if ("FULL TOSS".equals(d)) {
+            return "LOFTED DRIVE";
+        }
+        float a = dirDeg;
+        if (a < 45f) {
+            return "SQUARE CUT";
+        }
+        if (a < 70f) {
+            return band >= 4 ? "COVER DRIVE" : "OFF DRIVE";
+        }
+        if (a < 105f) {
+            return "STRAIGHT DRIVE";
+        }
+        if (a < 130f) {
+            return "ON DRIVE";
+        }
+        if (a < 150f) {
+            return "FLICK";
+        }
+        return "MIDWICKET DRIVE";
+    }
+
+    /** The running phase ends: award the runs actually completed. */
+    private void registerRuns(int n) {
+        lastRuns = n;
+        runs += n;
+        balls++;
+        ballLog.add(n == 0 ? "0" : String.valueOf(n));
+        resultTitle = n == 0 ? "NO RUN." : headlineFor(n);
+        resultKicker = n > 0 ? "NICELY PLAYED" : "DOT BALL";
+        resultSub = (shot == null ? "" : shot + " · ") + distM + " m"
+                + (n == 0 ? " · fielder got there first" : "");
+        checkInningsEnd();
+        rotateStrike();
     }
 
     private void registerWicket(boolean caught, String tLabel) {
@@ -524,6 +664,7 @@ public class BoundaryModel {
         resultSub = caught ? "A little early. A little too high." : "Through the gate. Timber.";
         swing = 1f;
         checkInningsEnd();
+        rotateStrike();
         ballLive = false;
         if (caught) {
             phase = Phase.RESULT;
@@ -649,6 +790,22 @@ public class BoundaryModel {
                 flyZ = -(float) Math.sin(rad) * range * 52f * q;           // into the outfield
                 flyY = BALL_R + flyApex * (float) Math.pow(Math.sin(q * (float) Math.PI), 0.8f);
                 if (phaseTimer >= flyDur * 1000f) {
+                    if (boundaryHit) {
+                        phase = Phase.RESULT; // 4/6: straight to the result
+                    } else {
+                        phase = Phase.RUNNING; // batsmen run between the wickets
+                        runTimer = 0f;
+                    }
+                    phaseTimer = 0;
+                }
+                break;
+            }
+            case RUNNING: {
+                runTimer += dtMs;
+                float maxByFielder = (float) Math.floor(fielderMs / RUN_MS);
+                float done = Math.min(targetRuns, maxByFielder);
+                if (runTimer >= done * RUN_MS) {
+                    registerRuns(Math.max(0, (int) done));
                     phase = Phase.RESULT;
                     phaseTimer = 0;
                 }
@@ -841,6 +998,8 @@ public class BoundaryModel {
             screen = "RESULT";
         } else if (p == Phase.FLYING) {
             screen = "FLYING";
+        } else if (p == Phase.RUNNING) {
+            screen = "RUNNING";
         } else {
             screen = "IN_PLAY";
         }
@@ -857,6 +1016,11 @@ public class BoundaryModel {
         kv.put("height", String.format("%.2f", batHeightNorm));
         kv.put("canStart", String.valueOf(p == Phase.READY || p == Phase.LOBBY));
         kv.put("canNext", String.valueOf(p == Phase.RESULT));
+        kv.put("canRun", String.valueOf(p == Phase.RUNNING || (p == Phase.FLYING && !boundaryHit)));
+        kv.put("hand", leftHanded ? "L" : "R");
+        kv.put("shot", shot == null ? "" : shot);
+        kv.put("players", String.valueOf(players));
+        kv.put("striker", String.valueOf(strikerSlot));
         kv.put("hint", phaseHintText());
         return kv;
     }
@@ -866,7 +1030,8 @@ public class BoundaryModel {
         switch (phase) {
             case RUNUP:
             case BOWLING: return bounces ? "Read the bounce. Stay ready." : "No bounce — drive it early.";
-            case FLYING: return "Follow the ball.";
+            case FLYING: return boundaryHit ? "Follow it to the rope." : "Follow the ball.";
+            case RUNNING: return "Take the single — or press RUN for another!";
             case RESULT: return "Reset your stance.";
             case READY: return "Start your innings when you're ready.";
             default: return "";

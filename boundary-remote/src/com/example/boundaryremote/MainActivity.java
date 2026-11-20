@@ -47,6 +47,9 @@ public class MainActivity extends Activity
     private long lastStateMs;
     private Vibrator vibrator;
     private boolean codeRejected; // TV refused our pairing code
+    private boolean handLeft;     // striker handedness shown on the phone
+    private int mode = 1;         // 1 = one player, 2 = two players (connect screen)
+    private int mySlot = 1;       // P1 or P2 when mode == 2
 
     // last pushed state for the reconnect card
     private String lastScore = "0 / 0";
@@ -68,6 +71,10 @@ public class MainActivity extends Activity
         client = new SessionClient(this);
         tracker = new TiltTracker(this, this);
         vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+        int[] role0 = prefs.loadRole();
+        mode = role0[0];
+        mySlot = role0[1];
+        ui.setMode(mode, mySlot);
 
         String demo = getIntent() == null ? null : getIntent().getStringExtra("demo");
         if (demo != null) {
@@ -178,7 +185,11 @@ public class MainActivity extends Activity
     // Connecting
     // =====================================================================
     private void connectTo(Discovery.TvInfo tv, String code) {
-        client.connect(tv.ip, tv.port, code, phoneName());
+        client.connect(tv.ip, tv.port, code, phoneName(), roleLabel());
+    }
+
+    private String roleLabel() {
+        return mode == 2 ? "P" + mySlot : "1P";
     }
 
     private String phoneName() {
@@ -190,7 +201,21 @@ public class MainActivity extends Activity
     // SessionClient.Listener
     // =====================================================================
     @Override
-    public void onConnected(final String tvName) {
+    public void onConnected(String tvName) {
+        onConnected(tvName, "1P");
+    }
+
+    @Override
+    public void onConnected(final String tvName, final String slotLabel) {
+        if ("P1".equals(slotLabel) || "P2".equals(slotLabel)) {
+            mode = 2;
+            mySlot = "P2".equals(slotLabel) ? 2 : 1;
+        } else {
+            mode = 1;
+            mySlot = 1;
+        }
+        prefs.saveRole(mode, mySlot);
+        ui.setMode(mode, mySlot);
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -243,8 +268,26 @@ public class MainActivity extends Activity
                     ui.setPrimary("RESUME INNINGS", true);
                     ui.setSecondary("BACK TO LOBBY", true);
                 } else {
-                    ui.setPrimary("SWING", true);
-                    ui.setSecondary("PAUSE GAME", true);
+                    // 2P: only the phone whose batsman is on strike gets the bat
+                    int players = parseIntSafe(kv.get("players"));
+                    int striker = parseIntSafe(kv.get("striker"));
+                    boolean myTurn = players != 2 || striker <= 0 || striker == mySlot;
+                    if (!myTurn) {
+                        ui.setPrimary("WAIT", false);
+                        ui.setSecondary("PAUSE GAME", true);
+                    } else if ("FLYING".equals(lastScreen) || "RUNNING".equals(lastScreen)) {
+                        boolean canRun = !"false".equals(kv.get("canRun"));
+                        ui.setPrimary(canRun ? "RUN +1" : "WATCH", canRun);
+                        ui.setSecondary("PAUSE GAME", true);
+                    } else {
+                        ui.setPrimary("SWING", true);
+                        ui.setSecondary("PAUSE GAME", true);
+                    }
+                }
+                String hand = kv.get("hand");
+                if (hand != null) {
+                    handLeft = "L".equals(hand);
+                    ui.setHand(handLeft);
                 }
             }
         });
@@ -265,6 +308,8 @@ public class MainActivity extends Activity
                     ui.setCode(code, true); // shake the boxes, show the mismatch copy
                     if ("VERSION".equals(f.length > 1 ? f[1] : "")) {
                         ui.setCodeError("Both apps must be the same version.\nUpdate Boundary on this phone.");
+                    } else if ("MODE".equals(f.length > 1 ? f[1] : "")) {
+                        ui.setCodeError("Mode mismatch.\nUse the same player count (and slot) on both phones.");
                     } else {
                         ui.setCodeError("That code doesn't match the TV. Check the number on screen.");
                     }
@@ -367,8 +412,12 @@ public class MainActivity extends Activity
 
     @Override
     public void onFlick() {
-        client.send("SWING");
-        buzz(25);
+        // a physical swing only counts while a delivery is live; on menu/result
+        // screens the flick must not trigger the focused pill
+        if ("IN_PLAY".equals(lastScreen) || "FLYING".equals(lastScreen)) {
+            client.send("SWING");
+            buzz(25);
+        }
     }
 
     // =====================================================================
@@ -392,6 +441,18 @@ public class MainActivity extends Activity
         } else if ("assist".equals(action)) {
             ui.setAssist(!ui.isAssistOn());
             client.send(ui.isAssistOn() ? "ASSIST\t1" : "ASSIST\t0");
+        } else if ("hand".equals(action)) {
+            handLeft = !handLeft;
+            ui.setHand(handLeft);
+            client.send(handLeft ? "HAND\tL" : "HAND\tR");
+        } else if ("mode1".equals(action)) {
+            setRole(1, mySlot);
+        } else if ("mode2".equals(action)) {
+            setRole(2, mySlot);
+        } else if ("slot1".equals(action)) {
+            setRole(mode, 1);
+        } else if ("slot2".equals(action)) {
+            setRole(mode, 2);
         } else if ("primary".equals(action)) {
             sendPrimary();
         } else if ("second".equals(action)) {
@@ -415,6 +476,9 @@ public class MainActivity extends Activity
         if ("SWING".equals(label)) {
             client.send("SWING");
             buzz(25);
+        } else if ("RUN +1".equals(label)) {
+            client.send("RUN");
+            buzz(25);
         } else if ("START INNINGS".equals(label)) {
             client.send("START");
         } else if ("NEXT DELIVERY".equals(label)) {
@@ -423,6 +487,18 @@ public class MainActivity extends Activity
             client.send("AGAIN");
         } else if ("RESUME INNINGS".equals(label)) {
             client.send("RESUME");
+        }
+    }
+
+    /** Player-mode choice on the connect screen (1P/2P + P1/P2); reconnects if live. */
+    private void setRole(int m, int s) {
+        mode = m;
+        mySlot = s;
+        prefs.saveRole(mode, mySlot);
+        ui.setMode(mode, mySlot);
+        if (client.isConnected() && chosenTv != null) {
+            client.disconnect(); // reconnect with the new role
+            connectTo(chosenTv, code);
         }
     }
 

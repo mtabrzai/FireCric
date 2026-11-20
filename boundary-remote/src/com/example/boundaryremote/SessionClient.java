@@ -32,6 +32,11 @@ public class SessionClient {
         void onEvent(String[] fields);
 
         void onDisconnected();
+
+        /** WELCOME carries the assigned role/slot label ("1P", "P1", "P2"). */
+        default void onConnected(String tvName, String slot) {
+            onConnected(tvName);
+        }
     }
 
     private final Listener listener;
@@ -48,6 +53,7 @@ public class SessionClient {
     private int port;
     private String code;
     private String phoneName = "Phone";
+    private String role = "1P"; // 1P, P1 or P2 — chosen on the connect screen
     private int backoffMs = 1000;
     private Thread netThread;
     private Thread pingThread;
@@ -76,11 +82,19 @@ public class SessionClient {
 
     /** Connect (or reconnect) to a TV. Safe to call again; replaces the session. */
     public synchronized void connect(String host, int port, String code, String phoneName) {
+        connect(host, port, code, phoneName, "1P");
+    }
+
+    /** Connect with a role: "1P" (single player) or "P1"/"P2" (two-player slot). */
+    public synchronized void connect(String host, int port, String code, String phoneName, String role) {
         this.host = host;
         this.port = port;
         this.code = code;
         if (phoneName != null && !phoneName.isEmpty()) {
             this.phoneName = phoneName;
+        }
+        if (role != null && !role.isEmpty()) {
+            this.role = role;
         }
         wantConnected = true;
         helloSent = false;
@@ -154,9 +168,9 @@ public class SessionClient {
         writer = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"));
         BufferedReader reader = new BufferedReader(new InputStreamReader(s.getInputStream(), "UTF-8"));
         this.reader = reader;
-        // HELLO is always the first line of a new connection
+        // HELLO is always the first line of a new connection (role = 1P | P1 | P2)
         outbox.clear();
-        writeLine(Protocol.join("HELLO", String.valueOf(Protocol.VERSION), code, phoneName));
+        writeLine(Protocol.join("HELLO", String.valueOf(Protocol.VERSION), code, phoneName, role));
         helloSent = true;
         startWriter();
         startPing();
@@ -204,10 +218,11 @@ public class SessionClient {
             welcomed = true;
             backoffMs = 1000;
             final String tv = f.length > 1 ? f[1] : "Fire TV";
+            final String slot = f.length > 2 ? f[2] : "1P";
             post(new Runnable() {
                 @Override
                 public void run() {
-                    listener.onConnected(tv);
+                    listener.onConnected(tv, slot);
                 }
             });
         } else if ("ERR".equals(f[0])) {
