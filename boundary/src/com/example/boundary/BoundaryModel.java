@@ -125,6 +125,10 @@ public class BoundaryModel {
     public boolean boundaryHit;                  // 4/6: automatic, no running
     private String shot;
 
+    // ---- players: 1 phone operates both batsmen; 2 phones alternate strike ----
+    private int players = 1;
+    private int strikerSlot = 1;                 // 1-based slot currently on strike
+
     // ---- innings ----
     public int runs, wickets, balls;
     public boolean gameOver;
@@ -227,6 +231,26 @@ public class BoundaryModel {
 
     public synchronized String getShotName() {
         return shot == null ? "" : shot;
+    }
+
+    public synchronized void setPlayers(int n) {
+        players = n == 2 ? 2 : 1;
+    }
+
+    public synchronized int getPlayers() {
+        return players;
+    }
+
+    /** Which phone (1-based slot) is on strike right now. */
+    public synchronized int getStrikerSlot() {
+        return strikerSlot;
+    }
+
+    /** After odd runs or at the end of an over, the strike rotates (2P only). */
+    private void rotateStrike() {
+        if (players == 2 && (balls % 6 == 0 || lastRuns % 2 == 1)) {
+            strikerSlot = strikerSlot == 1 ? 2 : 1;
+        }
     }
 
     /** Phone paired -> wait on the READY screen for Start innings. */
@@ -567,6 +591,7 @@ public class BoundaryModel {
             resultSub = shot + (lastRuns == 6 ? " · over the rope on the full"
                     : " · bounced before the rope") + " · " + distM + " m";
             checkInningsEnd();
+            rotateStrike();
         } else {
             // ball in play: the batsmen run. The single is the default; each RUN
             // press adds one more (max 3, and 3 is automatic on a deep gap); the
@@ -623,6 +648,7 @@ public class BoundaryModel {
         resultSub = (shot == null ? "" : shot + " · ") + distM + " m"
                 + (n == 0 ? " · fielder got there first" : "");
         checkInningsEnd();
+        rotateStrike();
     }
 
     private void registerWicket(boolean caught, String tLabel) {
@@ -638,6 +664,7 @@ public class BoundaryModel {
         resultSub = caught ? "A little early. A little too high." : "Through the gate. Timber.";
         swing = 1f;
         checkInningsEnd();
+        rotateStrike();
         ballLive = false;
         if (caught) {
             phase = Phase.RESULT;
@@ -992,6 +1019,8 @@ public class BoundaryModel {
         kv.put("canRun", String.valueOf(p == Phase.RUNNING || (p == Phase.FLYING && !boundaryHit)));
         kv.put("hand", leftHanded ? "L" : "R");
         kv.put("shot", shot == null ? "" : shot);
+        kv.put("players", String.valueOf(players));
+        kv.put("striker", String.valueOf(strikerSlot));
         kv.put("hint", phaseHintText());
         return kv;
     }

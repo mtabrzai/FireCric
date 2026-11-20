@@ -38,6 +38,20 @@ public class SessionServer {
 
         /** STATE body payload (k=v fields, no prefix). */
         String statePayload();
+
+        // ---- two-player variants (default bridge to the single-bat methods) ----
+        /** A validated command from bat `slot` (0 = P1/1P, 1 = P2). */
+        default void onCommand(String[] msg, int slot) {
+            onCommand(msg);
+        }
+
+        default void onBatConnected(String phoneName, int slot) {
+            onBatConnected(phoneName);
+        }
+
+        default void onBatLost(int slot) {
+            onBatLost();
+        }
     }
 
     private final int tcpPort;
@@ -50,11 +64,12 @@ public class SessionServer {
     private ServerSocket serverSocket;
     private DatagramSocket udpSocket;
 
-    // the one active bat
-    private final AtomicReference<Socket> batSocket = new AtomicReference<Socket>();
-    private final AtomicReference<BufferedWriter> batWriter = new AtomicReference<BufferedWriter>();
-    private final AtomicReference<String> batName = new AtomicReference<String>("");
-    private final AtomicLong lastRxMs = new AtomicLong(0);
+    // up to two bats: slot 0 = P1 (or the single 1P bat), slot 1 = P2
+    private final Socket[] batSockets = new Socket[2];
+    private final BufferedWriter[] batWriters = new BufferedWriter[2];
+    private final String[] batNames = new String[]{"", ""};
+    private final long[] lastRx = new long[]{0L, 0L};
+    private volatile int mode = 0; // 0 = unset, 1 = one player, 2 = two players
     private volatile boolean hadBat = false;
     private volatile boolean stateDirty = true;
 
@@ -81,7 +96,8 @@ public class SessionServer {
 
     public synchronized void stop() {
         running = false;
-        closeBat();
+        closeBat(0);
+        closeBat(1);
         try {
             if (serverSocket != null) {
                 serverSocket.close();
@@ -101,17 +117,39 @@ public class SessionServer {
         stateDirty = true;
     }
 
-    /** Sends an EVENT line to the active bat right away (no-op when none). */
+    /** Sends an EVENT line to all connected bats right away (no-op when none). */
     public void sendEvent(String eventLine) {
         sendLine("EVENT\t" + eventLine);
     }
 
     public boolean hasBat() {
-        return batSocket.get() != null;
+        return batSockets[0] != null || batSockets[1] != null;
+    }
+
+    public boolean hasSlot(int slot) {
+        return slot >= 0 && slot < 2 && batSockets[slot] != null;
+    }
+
+    /** True when the configured mode is satisfied (1P: any bat; 2P: both slots). */
+    public boolean modeSatisfied() {
+        return mode == 2 ? (hasSlot(0) && hasSlot(1)) : hasSlot(0);
+    }
+
+    public int mode() {
+        return mode;
     }
 
     public String batName() {
-        return batName.get();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 2; i++) {
+            if (batSockets[i] != null && batNames[i] != null && !batNames[i].isEmpty()) {
+                if (sb.length() > 0) {
+                    sb.append(" · ");
+                }
+                sb.append(mode == 2 ? "P" + (i + 1) + " " : "").append(batNames[i]);
+            }
+        }
+        return sb.toString();
     }
 
     // ------------------------------------------------------------------ loops
@@ -170,11 +208,13 @@ public class SessionServer {
                 } catch (InterruptedException e) {
                     return;
                 }
-                if (hadBat && batSocket.get() != null
-                        && System.currentTimeMillis() - lastRxMs.get() > 3000) {
-                    closeBat();
-                    listener.onBatLost();
-                    stateDirty = true;
+                for (int i = 0; i < 2; i++) {
+                    if (batSockets[i] != null
+                            && System.currentTimeMillis() - lastRx[i] > 3000) {
+                        closeBat(i);
+                        listener.onBatLost(i);
+                        stateDirty = true;
+                    }
                 }
             }
         }
@@ -189,10 +229,10 @@ public class SessionServer {
                 } catch (InterruptedException e) {
                     return;
                 }
-                if (batSocket.get() == null) {
+                if (!hasBat()) {
                     continue;
                 }
-                if (stateDirty || System.currentTimeMillis() - lastRxMs.get() > 1000) {
+                if (stateDirty || anySlotIdle(1000)) {
                     String payload = listener.statePayload();
                     if (payload != null && sendLine("STATE\t" + payload)) {
                         stateDirty = false;
@@ -205,6 +245,7 @@ public class SessionServer {
     // ------------------------------------------------------------------ serve
 
     private void serve(Socket s) {
+        int slot = -1;
         boolean active = false;
         try {
             s.setTcpNoDelay(true);
@@ -223,8 +264,9 @@ public class SessionServer {
                     continue;
                 }
                 if ("HELLO".equals(verb)) {
-                    if (!helloOk(msg, s, out)) {
-                        return; // rejected + closed
+                    slot = helloOk(msg, s, out); // -1 = rejected + closed
+                    if (slot < 0) {
+                        return;
                     }
                     active = true;
                     continue;
@@ -233,20 +275,19 @@ public class SessionServer {
                     write(out, "ERR\tVERSION");
                     return;
                 }
-                lastRxMs.set(System.currentTimeMillis());
+                lastRx[slot] = System.currentTimeMillis();
                 if ("TILT".equals(verb)) {
-                    listener.onCommand(msg); // high rate: no per-line state push
+                    listener.onCommand(msg, slot); // high rate: no per-line state push
                 } else {
-                    listener.onCommand(msg);
+                    listener.onCommand(msg, slot);
                     stateDirty = true; // discrete command -> refresh STATE soon
                 }
             }
         } catch (IOException ignored) {
         } finally {
-            if (active && batSocket.compareAndSet(s, null)) {
-                batWriter.set(null);
-                hadBat = false;
-                listener.onBatLost();
+            if (active && slot >= 0 && batSockets[slot] == s) {
+                closeBat(slot);
+                listener.onBatLost(slot);
                 stateDirty = true;
             }
             try {
@@ -256,62 +297,106 @@ public class SessionServer {
         }
     }
 
-    private boolean helloOk(String[] msg, Socket s, BufferedWriter out) throws IOException {
-        // HELLO\t<version>\t<code>\t<phoneName>
+    /** HELLO\t<version>\t<code>\t<phoneName>[\t<role 1P|P1|P2>] -> slot, or -1 if rejected. */
+    private int helloOk(String[] msg, Socket s, BufferedWriter out) throws IOException {
         int version = msg.length > 1 ? parseInt(msg[1]) : -1;
         if (version != Protocol.VERSION) {
             write(out, "ERR\tVERSION");
-            return false;
+            return -1;
         }
         if (msg.length < 3 || !PairingCode.matches(code, msg[2])) {
             write(out, "ERR\tCODE");
-            return false;
+            return -1;
         }
         String name = msg.length > 3 && msg[3].length() > 0 ? msg[3] : "Phone";
-        Socket prev = batSocket.get(); // single active bat: a new HELLO takes over
+        String role = msg.length > 4 ? msg[4].trim().toUpperCase() : "1P";
+        boolean twoP = "P1".equals(role) || "P2".equals(role);
+        int wantSlot;
+        synchronized (this) {
+            if (mode == 0) {
+                mode = twoP ? 2 : 1;
+            }
+            if (twoP && mode != 2) {
+                write(out, "ERR\tMODE"); // TV is in 1-player mode
+                return -1;
+            }
+            if (!twoP && mode != 1) {
+                write(out, "ERR\tMODE"); // TV is in 2-player mode
+                return -1;
+            }
+            wantSlot = "P2".equals(role) ? 1 : 0;
+            if (!twoP) {
+                role = "1P";
+            }
+        }
+        Socket prev = batSockets[wantSlot]; // a new HELLO on a slot takes over
         if (prev != null && prev != s) {
             try {
                 prev.close();
             } catch (IOException ignored) {
             }
         }
-        batSocket.set(s);
-        batWriter.set(out);
-        batName.set(name);
+        batSockets[wantSlot] = s;
+        batWriters[wantSlot] = out;
+        batNames[wantSlot] = name;
+        lastRx[wantSlot] = System.currentTimeMillis();
         hadBat = true;
-        lastRxMs.set(System.currentTimeMillis());
-        write(out, "WELCOME\t" + tvName);
-        listener.onBatConnected(name);
+        write(out, Protocol.join("WELCOME", tvName, role));
+        listener.onBatConnected(name, wantSlot);
         stateDirty = true;
-        return true;
+        return wantSlot;
     }
 
-    private boolean sendLine(String line) {
-        BufferedWriter w = batWriter.get();
-        if (w == null) {
-            return false;
-        }
-        synchronized (w) {
-            try {
-                w.write(line);
-                w.newLine();
-                w.flush();
+    private boolean anySlotIdle(long ms) {
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < 2; i++) {
+            if (batSockets[i] != null && now - lastRx[i] > ms) {
                 return true;
-            } catch (IOException e) {
-                closeBat();
-                return false;
             }
         }
+        return false;
     }
 
-    private void closeBat() {
-        Socket s = batSocket.getAndSet(null);
-        batWriter.set(null);
+    /** Broadcast a line to every connected bat. */
+    private boolean sendLine(String line) {
+        boolean any = false;
+        for (int i = 0; i < 2; i++) {
+            BufferedWriter w = batWriters[i];
+            if (w == null) {
+                continue;
+            }
+            synchronized (w) {
+                try {
+                    w.write(line);
+                    w.newLine();
+                    w.flush();
+                    any = true;
+                } catch (IOException e) {
+                    closeBat(i);
+                }
+            }
+        }
+        return any;
+    }
+
+    private void closeBat(int slot) {
+        if (slot < 0 || slot > 1) {
+            return;
+        }
+        Socket s;
+        synchronized (this) {
+            s = batSockets[slot];
+            batSockets[slot] = null;
+            batWriters[slot] = null;
+        }
         if (s != null) {
             try {
                 s.close();
             } catch (IOException ignored) {
             }
+        }
+        if (!hasBat()) {
+            hadBat = false;
         }
     }
 

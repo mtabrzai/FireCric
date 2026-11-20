@@ -50,4 +50,14 @@ public class PairingPrefs {
     public void clear() {
         prefs.edit().clear().apply();
     }
+
+    /** Remember the player-mode choice: mode 1|2 and slot 1|2. */
+    public void saveRole(int mode, int slot) {
+        prefs.edit().putInt("mode", mode).putInt("slot", slot).apply();
+    }
+
+    /** @return int[]{mode, slot}, defaults {1, 1}. */
+    public int[] loadRole() {
+        return new int[]{prefs.getInt("mode", 1) == 2 ? 2 : 1, prefs.getInt("slot", 1) == 2 ? 2 : 1};
+    }
 }
